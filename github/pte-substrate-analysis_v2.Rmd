@@ -1,0 +1,2355 @@
+---
+title: "General analysis of PTE multi-substrate data"
+output:
+  html_document:
+    code_folding: "hide"
+    toc: true
+    toc_float: true
+    toc_collapsed: true
+    toc_depth: 3
+    number_sections: true
+    theme: lumen
+---
+
+<style type="text/css">
+
+body{ /* Normal  */
+      font-size: 16px;
+  }
+td {  /* Table  */
+  font-size: 16px;
+}
+h1.title {
+  font-size: 28px;
+}
+h1 { /* Header 1 */
+  font-size: 24px;
+}
+h2 { /* Header 2 */
+    font-size: 22px;
+}
+h3 { /* Header 3 */
+  font-size: 20px;
+}
+code.r{ /* Code block */
+    font-size: 12px;
+}
+pre { /* Code block - determines code spacing between lines */
+    font-size: 14px;
+}
+</style>
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, error = FALSE, message = FALSE)
+
+if (!require('tidyverse')) install.packages('tidyverse'); library('tidyverse') # for everything
+if (!require('factoextra')) install.packages('factoextra'); library('factoextra') # for PCA
+if (!require('ggpubr')) install.packages('ggpubr'); library('ggpubr') # for paired plots
+if (!require('ggrepel')) install.packages('ggrepel'); library('ggrepel') # for labels
+if (!require('ggpubr')) install.packages('ggpubr'); library('ggpubr') # for paired plots
+if (!require('gridExtra')) install.packages('gridExtra'); library('gridExtra') # for arranging
+if (!require('factoextra')) install.packages('factoextra'); library('factoextra') # for PCA
+
+golden = "#edae49" # Color choice
+```
+
+# Data import and processing
+
+Charlotte was able to provide me with un-normalized (to PTE-S6) data for each variant with all 9 substrates.
+
+Due to a higher volume of data with important meta-data such as biological replicate number (experiment 1 vs 2 vs 3) and plate number (1 vs 2), I can also explore variation between these variables. Thus, it is good to first compile a large dataframe of all measurements and annotate the meta-data of experimental day, plate number, and substrate.
+
+## Import CSVs
+
+```{r import-files-no-norm}
+# List all CSV files in the directory
+csv_files <- list.files(path = "un-normalized-processed", pattern = "*.csv", full.names = TRUE, recursive = T)
+
+# Create an empty data frame to store the merged data
+merged_data <- tibble()
+
+# Loop through each CSV file, import, and merge the data
+for (file in csv_files) {
+  current_data <- read_csv(file, show_col_types = FALSE)
+  # Add a new column 'file_name' to the current data
+  current_data$substrate <- basename(file)
+  merged_data <- bind_rows(merged_data, current_data)
+}
+
+merged_data <- merged_data %>%
+  mutate(substrate = gsub("\\.csv", "", substrate)) %>%
+  mutate(across(-c('p233', 'p254', 'p271', 'p272', 'p306', 'p313'), ~ ifelse(. == 0, NA, .)))
+
+# Print the summary of the merged data
+knitr::kable(
+  head(merged_data)
+)
+```
+
+Now it is best to `pivot_longer` and add in the experimental day and plate ID to each measurement
+
+```{r meta-data-addition-no-norm}
+processed_data <- merged_data %>%
+  # Remove pte columns from non-F16 variants
+  pivot_longer(cols = exp1:pte24, names_to = 'replicate', values_to = 'activity', values_drop_na = TRUE) %>%
+  # Add experimental day meta-data
+  mutate(exp_day = case_when(
+      grepl("\\bexp1\\b|\\bexp2\\b|\\bexp3\\b", replicate) ~ "day1",
+      grepl("\\bexp4\\b|\\bexp5\\b|\\bexp6\\b", replicate) ~ "day2",
+      grepl("\\bexp7\\b|\\bexp8\\b|\\bexp9\\b", replicate) ~ "day3",
+      grepl("\\bpte1\\b|\\bpte2\\b|\\bpte3\\b|\\bpte4\\b|\\bpte5\\b|\\bpte6\\b|\\bpte7\\b|\\bpte8\\b", replicate) ~ "day1",
+      grepl("\\bpte9\\b|\\bpte10\\b|\\bpte11\\b|\\bpte12\\b|\\bpte13\\b|\\bpte14\\b|\\bpte15\\b|\\bpte16\\b", replicate) ~ "day2",
+      grepl("\\bpte17\\b|\\bpte18\\b|\\bpte19\\b|\\bpte20\\b|\\bpte21\\b|\\bpte22\\b|\\bpte23\\b|\\bpte24\\b", replicate) ~ "day3",
+      TRUE ~ NA
+  )) %>%
+  # Add plate ID meta-data
+    # Add plate ID meta-data
+  mutate(plate_id_1 = case_when(
+      grepl("[DB]", Code) ~ "plate1",
+      grepl("[EF]", Code) ~ "plate2",
+      TRUE ~ NA
+  )) %>%
+  mutate(plate_id_2 = case_when(
+      grepl("\\bpte1\\b|\\bpte2\\b|\\bpte3\\b|\\bpte4\\b|\\bpte9\\b|\\bpte10\\b|\\bpte11\\b|\\bpte12\\b|\\bpte17\\b|\\bpte18\\b|\\bpte19\\b|\\bpte20\\b", replicate) ~ "plate1",
+      grepl("\\bpte5\\b|\\bpte6\\b|\\bpte7\\b|\\bpte8\\b|\\bpte13\\b|\\bpte14\\b|\\bpte15\\b|\\bpte16\\b|\\bpte21\\b|\\bpte22\\b|\\bpte23\\b|\\bpte24\\b", replicate) ~ "plate2",
+      TRUE ~ NA
+  )) %>%
+  mutate(plate_id = coalesce(plate_id_2, plate_id_1)) %>%
+  # Old code and transient plate_id columns can be dropped
+  select(-c(Code, plate_id_1, plate_id_2)) %>%
+  # "DHLLFI" is wt while "ERFMIF" is mutant
+  mutate(g233 = if_else(p233 == 0, "D", "E"),
+       g254 = if_else(p254 == 0, "H", "R"),
+       g271 = if_else(p271 == 0, "L", "F"),
+       g272 = if_else(p272 == 0, "F", "M"),
+       g306 = if_else(p306 == 0, "F", "I"),
+       g313 = if_else(p313 == 0, "I", "F")) %>%
+  unite("reference", g233:g313, na.rm = TRUE, remove = TRUE, sep = "")
+
+# Print the summary of the processed data
+knitr::kable(
+  head(processed_data)
+)
+```
+
+These data are ready to be taken forward for various analyses
+
+## Summarize mean and sd of function
+
+```{r mean-and-sd-no-norm}
+mae_mean <- function(x) {
+  abs_devs = c()
+  for(i in 1:length(x)) {
+    abs_devs = c(abs(x - mean(x)), abs_devs)
+  }
+  return(mean(abs_devs))
+}
+
+mae_median <- function(x) {
+  abs_devs = c()
+  for(i in 1:length(x)) {
+    abs_devs = c(abs(x - median(x)), abs_devs)
+  }
+  return(median(abs_devs))
+}
+
+
+processed_mean_data <- processed_data %>%
+  group_by(p233, p254, p271, p272, p306, p313, substrate, reference) %>%
+  summarise(mean_activity = mean(activity),
+            sd_activity = sd(activity),
+            mae_mean_activity = mae_mean(activity),
+            mae_median_activity = mae_median(activity),
+            total_entries = n()) %>%
+  mutate(cv = sd_activity/mean_activity*100,
+         mean_fold_error = (mae_mean_activity/mean_activity) + 1,
+         median_absolute_deviation = mae_median_activity/mean_activity)
+
+knitr::kable(
+  head(processed_mean_data)
+)
+```
+
+We can then look at the distribution of coefficient of variation for each variant across faceted substrates:
+
+```{r mean-and-sd-no-norm-sd-hist}
+cv_fig <- processed_mean_data %>%
+  ggplot(aes(x = cv)) +
+  geom_histogram(fill = golden) +
+  facet_wrap(~ substrate) +
+  geom_vline(xintercept = 25, lty = 2) +
+  geom_text(aes(x = 32.5, y = 25, label = "25%"), size = 2) +
+  geom_vline(xintercept = 50, lty = 2, col = "darkred") +
+  geom_text(aes(x = 57.5, y = 25, label = "50%"), size = 2, col = "darkred") +
+  labs(x = "Coefficient of Variation (%)", y = "Genotypes") +
+  theme_classic()
+
+cv_fig
+
+##ggsave("cv_fig.svg", plot = cv_fig, width = 180, height = 247/3, dpi = 300, units = "mm")
+```
+
+As well as the mean absolute error:
+
+```{r mean-and-sd-no-norm-mae-hist}
+
+new_order <- c("2NH", "acetate", "butyrate", 
+               "DHC", "POE", "POM", 
+               "tbbl", "PTE", "PTM")
+
+mae_fig <- processed_mean_data %>%
+  mutate(substrate = factor(substrate, levels = new_order)) %>%
+  ggplot(aes(x = mean_fold_error)) +
+  geom_histogram(fill = golden, color = "black", linewidth = 0.1, binwidth = 0.05) +
+  facet_wrap(~ substrate) +
+  geom_vline(xintercept = 1.5, lty = 2, linewidth = 0.2) +
+  #geom_text(aes(x = 1.58, y = 22.5, label = "1.5-fold"), size = 2) +
+  #geom_vline(xintercept = 2, lty = 2, col = "darkred") +
+  #geom_text(aes(x = 1.93, y = 22.5, label = "2-fold"), size = 2, col = "darkred") +
+  labs(x = "Mean fold error (MAE)", y = "Genotypes") +
+  #ylim(0, 25) +
+  theme_classic() +
+  theme(
+    strip.background = element_blank(),
+    strip.text.x = element_blank(),
+    panel.background = element_blank(), 
+    panel.border = element_rect(fill = NA, color = "black", linewidth = 0.3),
+    axis.line = element_line(colour = "black", linewidth=0.25),
+    axis.ticks = element_line(linewidth = 0),
+    axis.title = element_text(size = 8),
+    axis.title.x = element_text(vjust = -1),
+    axis.title.y = element_text(vjust = 2.5),
+    axis.text = element_text(size = 8),
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+
+mae_fig
+
+ggsave("mae_fig_v2.svg", plot = mae_fig, width = 180/2.5, height = 180/3.5, dpi = 600, units = "mm")
+```
+
+## Creating a normalized dataframe
+
+### Ensuring log-transformed data is normally distributed
+
+As the title says. To do this, it is worth collecting all the data, subtracting by the mean (to set the mean equal to 0) for each reference/substrate pair, then pooling all the data to verify that it is normally distributed (i.e. the errors on the log scale are normally distributed)
+
+```{r normal-dist-test}
+norm_data <- processed_data %>%
+  group_by(substrate) %>%
+  mutate(norm_activity = activity/mean(activity[reference == "DHLFFI"]), # Normalize by the mean activity of the wt sequence for each sub
+         norm_activity = log10(norm_activity)) %>% # Log-transform
+  ungroup() %>%
+  group_by(substrate, reference) %>%
+  mutate(norm_value = norm_activity - mean(norm_activity)) %>% # Set mean of each measurement to 0 
+  ungroup() 
+
+n_obs <- nrow(norm_data)
+bw <- 0.01
+
+norm_fig <- norm_data %>%
+  ggplot(aes(x = norm_value)) +
+  geom_histogram(binwidth = bw, fill = "grey", color = "black", lwd = 0.05) + # Default is count
+  stat_function(fun = function(x) dnorm(x, mean = mean(norm_data$norm_value), 
+                                           sd = sd(norm_data$norm_value)) * n_obs * bw, 
+                colour = "black",
+                linewidth = 0.3) +
+  labs(x = expression("log"[10]*" residuals from mean"),
+       y = "Count") +
+  theme_classic() +
+  theme(
+    panel.background = element_blank(), 
+    panel.border = element_rect(fill = NA, color = "black", linewidth = 0.3),
+    axis.line = element_line(colour = "black", linewidth=0.25),
+    axis.ticks = element_line(linewidth = 0),
+    axis.title = element_text(size = 8),
+    axis.title.x = element_text(vjust = -1),
+    axis.title.y = element_text(vjust = 2.5),
+    axis.text = element_text(size = 8),
+  )
+
+norm_fig
+
+
+ggsave("norm_fig_v2.svg", plot = norm_fig, width = 180/2.5, height = 180/3.5, dpi = 600, units = "mm")
+```
+
+And the qqplot
+
+```{r normal-dist-test-2}
+#qqnorm(norm_data$norm_value, pch = 1, frame = FALSE)
+#qqline(norm_data$norm_value, col = "steelblue", lwd = 2)
+
+library(patchwork)
+
+# Create the QQ plot
+qq_inset <- norm_data %>%
+  ggplot(aes(sample = norm_value)) +
+  stat_qq(size = 1.5, shape = 21, fill = "grey", color = "black", stroke = 0.15) +
+  stat_qq_line(color = "red") + 
+  labs(x = "Normal distribution quantiles", 
+       y = expression("log"[10]*" residuals from mean"), 
+       title = NULL) +
+  theme_classic() +
+  theme(
+    panel.background = element_blank(), 
+    panel.border = element_rect(fill = NA, color = "black", linewidth = 0.3),
+    axis.line = element_line(colour = "black", linewidth=0.25),
+    axis.ticks = element_line(linewidth = 0),
+    axis.title = element_text(size = 8),
+    axis.title.x = element_text(vjust = -1),
+    axis.title.y = element_text(vjust = 2.5),
+    axis.text = element_text(size = 8),
+  )
+
+qq_inset
+
+ggsave("qqplot_fig_v2.svg", plot = qq_inset, width = 180/2.5, height = 180/3.5, dpi = 600, units = "mm")
+
+```
+
+### Alternative normaliziation
+
+I'm also curious if I can log-transform first, followed by normalization by subtraction:
+
+```{r normal-dist-alt-test}
+norm_data_2 <- processed_data %>%
+  group_by(substrate) %>%
+  mutate(norm_activity = log10(activity), # Log-transform,
+         norm_activity = norm_activity - mean(norm_activity[reference == "DHLFFI"])) %>% # Normalize by the mean activity of the wt sequence for each sub
+  ungroup() %>%
+  group_by(substrate, reference) %>%
+  mutate(norm_value = norm_activity - mean(norm_activity)) # Set mean of each measurement to 0
+
+norm_data_2 %>%
+  ggplot(aes(x = norm_value)) +
+  geom_histogram(aes(y = after_stat(density)), binwidth = 0.01, color = "black", fill = golden, lwd = 0.2) +
+  stat_function(fun = dnorm, args = list(mean = mean(norm_data_2$norm_value), sd = sd(norm_data_2$norm_value)), colour = "black") +
+  theme_classic()
+```
+
+```{r normal-dist-alt-test-2}
+qqnorm(norm_data_2$norm_value, pch = 1, frame = FALSE)
+qqline(norm_data_2$norm_value, col = "steelblue", lwd = 2)
+```
+
+These look identical. It is just a matter of which mean is the reference mean I suppose? Thus, I am dealing on the log-scale and if I back-transform I need to use the log-based mean and SDs, not the individual values.
+
+### Creating a data frame with statistics
+
+It may be useful to have a data frame that describes all of the general statistics. Since we've tested for normality, it is fair to get a mean and SD directly from the log-transformed data. **Note:** when you use these values to convert back to a fold-change scale, you will obtain a geometric mean of the fold-change. This is probably fair as "fold-change errors" are likely log-normal, this GM and GMSD are better metrics for those.
+
+```{r normalizing-no-norm-mae-hist}
+normalized_bulky_mean_data <- norm_data %>%
+  select(-c("replicate", "activity", "exp_day", "plate_id", "norm_value")) %>%
+  group_by(p233, p254, p271, p272, p306, p313, substrate, reference) %>%
+  # Error propagation - http://surl.li/qrptg
+  summarize(mean_value = mean(norm_activity),
+         sd_value = sd(norm_activity),
+         total_entries = n()) %>%
+  mutate(se_value = sd_value / sqrt(total_entries) ) %>%
+  ungroup()
+
+knitr::kable(
+  head(normalized_bulky_mean_data)
+)
+```
+
+## Monitor across day variation
+
+To do later... Probably some ANOVA across PTE-S6 as this is a nice "constant" with plenty of replicates across plates and days
+
+## Monitor across plate variation
+
+To do later... see above
+
+# Looking at SMEs
+
+Already did this elsewhere but just for plotting sake:
+
+```{r}
+subs <- c("2NH", "acetate", "butyrate", 
+               "DHC", "POE", "POM", 
+               "tbbl", "PTE", "PTM")
+
+# Function to calculate single mutational effects
+calculate_single_mutational_effects <- function(data, positions = NULL) {
+  
+  # Tibble for storing results for each substrate
+  results <- tibble()
+  
+  for(sub in 1:length(subs)){
+      
+    # If positions not specified, use all position columns (assuming they start with 'p')
+    if (is.null(positions)) {
+      positions <- names(data)[grepl("^p", names(data))]
+    }
+    
+    # Calculate stats for all genotypes
+    genotype_stats <- data %>%
+      filter(substrate == subs[sub]) %>%
+      select(c(all_of(positions), substrate, mean_activity, sd_activity, total_entries)) %>%
+      # Create a genotype identifier
+      unite("genotype", all_of(positions), sep = "", remove = FALSE)
+    
+    # Find the all-wild-type background (all positions = 0)
+    all_wt_genotype <- paste0(rep("0", length(positions)), collapse = "")
+    wt_reference <- genotype_stats %>%
+      filter(genotype == all_wt_genotype)
+    
+    if (nrow(wt_reference) != 1 || is.na(wt_reference$mean_activity)) {
+      stop("Could not find valid all-wild-type reference genotype")
+    }
+    
+    for (i in seq_along(positions)) {
+      pos_name <- positions[i]
+      other_positions <- positions[-i]
+      
+      # Get all unique backgrounds for the other positions
+      if (length(other_positions) > 0) {
+        backgrounds <- genotype_stats %>%
+          select(all_of(other_positions)) %>%
+          distinct()
+        
+        for (j in 1:nrow(backgrounds)) {
+          background_row <- backgrounds[j, ]
+          
+          # Find matching genotypes
+          wt_condition <- genotype_stats
+          mut_condition <- genotype_stats
+          
+          # Filter by background
+          for (pos in other_positions) {
+            wt_condition <- wt_condition %>% filter(!!sym(pos) == background_row[[pos]])
+            mut_condition <- mut_condition %>% filter(!!sym(pos) == background_row[[pos]])
+          }
+          
+          # Filter by target position
+          wt_condition <- wt_condition %>% filter(!!sym(pos_name) == 0)
+          mut_condition <- mut_condition %>% filter(!!sym(pos_name) == 1)
+          
+          if (nrow(wt_condition) == 1 && nrow(mut_condition) == 1 && 
+              !is.na(wt_condition$mean_activity) && !is.na(mut_condition$mean_activity) &&
+              wt_condition$mean_activity > 0 && mut_condition$mean_activity > 0) {
+            
+            # Calculate fold change relative to all-WT background
+            wt_fold_change <- wt_condition$mean_activity / wt_reference$mean_activity
+            mut_fold_change <- mut_condition$mean_activity / wt_reference$mean_activity
+            
+            # Calculate the ratio (mutant fold change / WT fold change)
+            effect_ratio <- mut_fold_change / wt_fold_change
+            
+            # Error propagation for ratios
+            # For wt_fold_change = wt_condition / wt_reference
+            cv_wt_fold <- sqrt(wt_condition$sd_activity^2 + wt_reference$sd_activity^2)
+            sd_wt_fold <- wt_fold_change * cv_wt_fold
+            
+            # For mut_fold_change = mut_condition / wt_reference  
+            cv_mut_fold <- sqrt(mut_condition$sd_activity^2 + wt_reference$sd_activity^2)
+            sd_mut_fold <- mut_fold_change * cv_mut_fold
+            
+            # For effect_ratio = mut_fold_change / wt_fold_change
+            cv_effect_ratio <- sqrt(cv_mut_fold^2 + cv_wt_fold^2)
+            effect_sd <- effect_ratio * cv_effect_ratio
+            
+            # Calculate SEM for the ratio (approximate - assumes independent measurements)
+            # This is an approximation since we're combining different sample sizes
+            effective_n <- min(wt_condition$total_entries, mut_condition$total_entries, wt_reference$total_entries)
+            effect_sem <- effect_sd / sqrt(effective_n)
+            
+            # Log-transformed values (log10 instead of log2)
+            log_effect <- log10(effect_ratio)
+            # For log transformation: SD_log = SD_ratio / (ratio * ln(10)) for log10
+            log_effect_sd <- effect_sd / (effect_ratio * log(10))
+            log_effect_sem <- effect_sem / (effect_ratio * log(10))
+            
+            # Create background string
+            background_string <- paste0(background_row, collapse = "")
+            
+            # Create variant ID with X at the position being mutated
+            variant_genotype <- strsplit(wt_condition$genotype, "")[[1]]
+            variant_genotype[i] <- "X"
+            variant_id <- paste0(variant_genotype, collapse = "")
+            
+            results <- bind_rows(results, tibble(
+              position = pos_name,
+              variant_id = variant_id,
+              background = subs[sub],
+              effect_ratio = effect_ratio,
+              effect_sd = effect_sd,
+              effect_sem = effect_sem,
+              log10_effect = log_effect,
+              log10_effect_sd = log_effect_sd,
+              log10_effect_sem = log_effect_sem,
+              wt_genotype = wt_condition$genotype,
+              mut_genotype = mut_condition$genotype,
+              wt_mean = wt_condition$mean_activity,
+              mut_mean = mut_condition$mean_activity,
+              wt_fold_vs_reference = wt_fold_change,
+              mut_fold_vs_reference = mut_fold_change,
+              wt_n = wt_condition$total_entries,
+              mut_n = mut_condition$total_entries
+            ))
+          }
+        }
+      }
+    }
+    }
+  
+  return(results)
+}
+```
+
+And we run
+
+```{r}
+smes_pte <- calculate_single_mutational_effects(processed_mean_data)
+```
+
+Then do some plotting
+
+```{r}
+positions <- c('p233', 'p254', 'p271', 'p272', 'p306', 'p313')
+
+position_summary <- smes_pte %>%
+  mutate(position = factor(position, levels = positions),
+         background = factor(background, levels = new_order)) %>%
+  group_by(position, background) %>%
+  summarise(log10_effect = mean(log10_effect))
+
+position_summary_2 <- smes_pte %>%
+  mutate(position = factor(position, levels = positions),
+         background = factor(background, levels = new_order)) %>%
+  group_by(position, background) %>%
+  mutate(additional_mut = str_count(variant_id, '1')) %>%
+  filter(additional_mut == 0)
+
+smes_pte %>%
+  mutate(position = factor(position, levels = positions),
+         background = factor(background, levels = new_order)) %>%
+  ggplot(aes(x = position, y = log10_effect)) +
+  facet_wrap(~background) +
+  geom_hline(yintercept = 0, lty = 2, linewidth = 0.3) +
+  geom_jitter(width = 0.2, color = "lightblue", size = 0.5) +
+  #geom_point(color = "lightblue", size = 0.5) +
+  geom_point(data = position_summary, aes(y = log10_effect), 
+             color = "darkred", size = 1) +
+  geom_point(data = position_summary_2, aes(y = log10_effect), 
+             color = "black", size = 1) +
+  labs(x = "Position",
+       y = "log10 fold-change") +
+  #ylim(c(-4, 4)) +
+  theme_classic() +
+  theme(
+    strip.background = element_blank(),
+    strip.text.x = element_blank(),
+    panel.background = element_blank(), 
+    panel.border = element_rect(fill = NA, color = "black", linewidth = 0.3),
+    axis.line = element_line(colour = "black", linewidth=0.25),
+    axis.ticks = element_line(linewidth = 0),
+    axis.title = element_text(size = 8),
+    axis.title.x = element_text(vjust = -1),
+    axis.title.y = element_text(vjust = 2.5),
+    axis.text = element_text(size = 8),
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+```
+
+Or we wrap by position
+
+```{r}
+other_subs_order <- c("2NH", "Acetate", "Butyrate", "POE", "PTE", "POM", "PTM", "DHC", "TBBL")
+
+position_summary <- smes_pte %>%
+  mutate(position = factor(position, levels = positions),
+         background = case_when(background == "acetate" ~ "Acetate",
+                                background == "butyrate" ~ "Butyrate",
+                                background == "tbbl" ~ "TBBL",
+                                TRUE ~ background),
+         background = factor(background, levels = other_subs_order)) %>%
+  group_by(position, background) %>%
+  summarise(log10_effect = mean(log10_effect))
+
+position_summary_2 <- smes_pte %>%
+  mutate(position = factor(position, levels = positions),          
+         background = case_when(background == "acetate" ~ "Acetate",
+                                background == "butyrate" ~ "Butyrate",
+                                background == "tbbl" ~ "TBBL",
+                                TRUE ~ background),
+         background = factor(background, levels = other_subs_order)) %>%
+  group_by(position, background) %>%
+  mutate(additional_mut = str_count(variant_id, '1')) %>%
+  filter(additional_mut == 0)
+
+smes_fig <- smes_pte %>%
+  mutate(position = factor(position, levels = positions),          
+         background = case_when(background == "acetate" ~ "Acetate",
+                                background == "butyrate" ~ "Butyrate",
+                                background == "tbbl" ~ "TBBL",
+                                TRUE ~ background),
+         background = factor(background, levels = other_subs_order)) %>%
+  ggplot(aes(x = background, y = log10_effect)) +
+  facet_wrap(~ position) +
+  geom_hline(yintercept = 0, lty = 2, linewidth = 0.3) +
+  geom_jitter(width = 0.2, color = "lightblue", size = 0.2, alpha = 0.5) +
+  #geom_point(color = "lightblue", size = 0.5) +
+  geom_point(data = position_summary, aes(y = log10_effect), 
+             color = "darkred", size = 5, shape = "-") +
+  geom_point(data = position_summary_2, aes(y = log10_effect), 
+             color = "black", size = 5, shape = "-") +
+  labs(x = "Position",
+       y = "log10 fold-change") +
+  #ylim(c(-4, 4)) +
+  theme_classic() +
+  theme(
+    strip.background = element_blank(),
+    strip.text.x = element_blank(),
+    panel.background = element_blank(), 
+    panel.border = element_rect(fill = NA, color = "black", linewidth = 0.3),
+    axis.line = element_line(colour = "black", linewidth=0.25),
+    axis.ticks = element_line(linewidth = 0),
+    axis.title = element_text(size = 8),
+    axis.title.x = element_text(vjust = -1),
+    axis.title.y = element_text(vjust = 2.5),
+    axis.text.y = element_text(size = 8),
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 6)
+  )
+
+smes_fig
+
+ggsave("fig_4_a.svg", plot = smes_fig, width = 180/1.75, height = 180/2.7, dpi = 600, units = "mm")
+```
+
+# Epistasis tests
+
+## Generating SMEs and EEs
+
+```{r making-sme-and-ee}
+## Helper functions 
+
+error_prop <- function(x){
+  return(sqrt(sum(x**2)))
+}
+
+harm_mean <- function(x){
+  return(length(x)/sum(1/x))
+}
+
+alternate_sub_add <- function(x){
+  # Takes the last term and alternates between subtracting and adding the next term to the left
+  y = x[length(x)]
+  counter = T
+  if(length(x) > 1) {
+    for(i in (length(x)-1):1){
+      if(counter){
+        y = y - x[i]
+        counter = F
+      } else{
+        y = y + x[i]
+        counter = T
+      }
+    }
+  }
+  return(y)
+}
+
+## There is probably a better way to do this but here it is:
+
+# Generate all possible combinations of numbers 1 to 6
+all_combinations <- lapply(1:6, function(x) combn(1:6, x, simplify = FALSE))
+
+# Combine all combinations into a single list
+combined_combinations <- unlist(all_combinations, recursive = FALSE)
+
+###
+
+ees = data.frame()
+
+for(sub in 1:length(unique(normalized_bulky_mean_data$substrate))){
+  
+  temp_small_data <- normalized_bulky_mean_data %>%
+    filter(substrate == unique(normalized_bulky_mean_data$substrate)[sub])
+  
+  for(combo in 1:length(combined_combinations)) {
+    if(combo != length(combined_combinations)) {
+      temp_small_data_ready <- temp_small_data %>%
+      rowwise() %>%
+      mutate(muts = sum(p233, p254, p271, p272, p306, p313)) %>%
+      ungroup() %>%
+      filter_at(vars(combined_combinations[[combo]]), all_vars(. != 1)) %>%
+      group_by(muts)
+    } else {
+      temp_small_data_ready <- temp_small_data %>%
+      rowwise() %>%
+      mutate(muts = sum(p233, p254, p271, p272, p306, p313)) %>%
+      ungroup() %>%
+      group_by(muts)
+    }
+
+    cur_harm_mean <- temp_small_data_ready %>% pull(total_entries) %>% harm_mean() # Get harmonic mean
+    
+    # Calculate epistasis with error propagation
+    next_term <- temp_small_data_ready %>%
+      summarize(new_val = sum(mean_value),
+                new_se = error_prop(se_value)) %>%
+      ungroup() %>%
+      summarize(new_val = alternate_sub_add(new_val),
+                new_se = error_prop(new_se)) %>%
+      mutate(new_n = cur_harm_mean)
+    
+    ref_geno = "000000"
+    current = unique(which(!(seq(1, 6, 1) %in% combined_combinations[[combo]])))
+    if(length(current) > 0){
+      for(number in 1:length(current)){
+        substr(ref_geno, current[number], current[number]) <- 'x'
+      }
+    } else {
+      ref_geno = "xxxxxx"
+    }
+    
+    ees = rbind(ees, next_term %>% mutate(geno = ref_geno,
+                                          sub = unique(normalized_bulky_mean_data$substrate)[sub]))
+  }
+}
+
+ees <- ees %>% distinct() # Remove duplicates
+```
+
+## Significance testing of EEs
+
+Next comes significance testing. Thanks to Dan for the code to perform the adjusted p-value. **Note: something seems off with the harmonic mean for the 6th order terms. I need to check on that.**
+
+```{r ee-sig-test}
+## SOMETHING IS WRONG WITH THE HARMONIC MEAN FOR THE 6TH ORDER TERM
+
+test_ees <- ees %>%
+  mutate(t = (new_val)/new_se,
+         p= 2*pt(abs(t),df=new_n-1,lower=F)) %>%
+  mutate(padj = p.adjust(p,method = 'fdr'),n=nrow(.),
+         muts = str_count(geno, 'x'),
+         sig = padj < 0.05)
+
+knitr::kable(
+  head(test_ees)
+)
+```
+
+Finally we can visualize this in volcano plots to look at EEs (x-axis) vs significance (y-axis):
+
+```{r volc-plots-ees}
+new_order <- c("2NH", "acetate", "butyrate", 
+               "DHC", "POE", "POM", 
+               "tbbl", "PTE", "PTM")
+
+volcano_fig <- test_ees %>%
+  #filter(muts > 1) %>%
+  mutate(sub = factor(sub, levels = new_order),
+         muts = factor(muts)) %>%
+  ggplot(aes(x = new_val, y = -1*log10(padj), color = muts)) +
+  geom_point(size = 0.5) +
+  geom_hline(yintercept = -log10(0.05), lty = 2, linewidth = 0.2) +
+  geom_vline(xintercept = 0, lty = 2, linewidth = 0.2) +
+  xlim(-2.5, 2.5) +
+  facet_wrap(~ sub) +
+  scale_color_viridis_d(option = "plasma", end = 0.9) +
+  #guides(color = guide_legend(override.aes = list(size = 4))) +
+  labs(x = "Epistatic Coefficient", 
+       y = expression("-log"[10]*" p-value"),
+       color = "Order") +
+  theme_classic() +
+  theme(
+    strip.background = element_blank(),
+    strip.text.x = element_blank(),
+    panel.background = element_blank(), 
+    panel.border = element_rect(fill = NA, color = "black", linewidth = 0.3),
+    axis.line = element_line(colour = "black", linewidth=0.25),
+    axis.ticks = element_line(linewidth = 0),
+    axis.title = element_text(size = 8),
+    axis.title.x = element_text(vjust = -1),
+    axis.title.y = element_text(vjust = 2.5),
+    axis.text = element_text(size = 8),
+    legend.title = element_text(size = 8),
+    legend.text = element_text(size = 8)
+  )
+
+volcano_fig
+
+#ggsave("fig_4_b.svg", plot = volcano_fig, width = 180/2, height = 180/2.8, dpi = 600, units = "mm")
+```
+
+## Bespoke plotting for manuscript
+
+### 271-313 esters
+
+```{r}
+bar_plot <- test_ees %>%
+  filter(geno == "00x00x" & # 271-313
+         (sub == "2NH" | sub == "acetate" | sub == "butyrate" |
+            sub == "POE" | sub == "PTE" | sub == "POM" | sub == "PTM")) %>%
+  mutate(sub = factor(sub, levels = new_order),
+         sub = case_when(sub == "acetate" ~ "Acetate",
+                         sub == "butyrate" ~ "Butyrate",
+                         TRUE ~ sub)) %>%
+  ggplot(aes(x = sub, y = new_val, fill = sub)) +
+  # Set width to 1 to make them touch
+  geom_col(color = "black", width = 1, linewidth = 0.1) + 
+  geom_errorbar(aes(ymin = new_val - new_se, 
+                    ymax = new_val + new_se), 
+                width = 0.1,
+                linewidth = 0.2) +
+  scale_fill_manual(values = c("#ff6e66", "#ffcfcc", "#ff9e99",  "#ffaf4d", "#ffc680", "#ffddb3", "#ffe8cc")) +
+  geom_hline(yintercept = 0, linewidth = 0.5) +
+  labs(y = expression("log"[10]*"Epistatic effect (EE)")) +
+  ylim(-0.8, 0.8) +
+  theme_classic() +
+    theme(
+    legend.position = "none",
+    panel.border = element_rect(fill = NA, color = "black", linewidth = 0.3),
+    axis.line = element_line(linewidth=0),
+    axis.ticks = element_line(linewidth = 0.25),
+    axis.title = element_text(size = 5),
+    axis.title.x = element_blank(),
+    axis.title.y = element_text(size = 5),
+    axis.text.y = element_text(size = 5),
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 5)
+  )
+
+bar_plot
+
+ggsave("fig_6_2nh_271-313.svg", plot = bar_plot, width = 180/6, height = 180/6, dpi = 600, units = "mm")
+```
+
+
+```{r}
+test_ees %>%
+  filter((sub == "2NH" | sub == "acetate" | sub == "butyrate") & 
+           geno == "00x0x0") %>%
+  mutate(new_val = 10^new_val)
+```
+
+### 233-254 esters
+
+```{r}
+bar_plot <- test_ees %>%
+  filter(geno == "xx0000" & # 233-254
+         (sub == "2NH" | sub == "acetate" | sub == "butyrate" |
+            sub == "POE" | sub == "PTE" | sub == "POM" | sub == "PTM")) %>%
+  mutate(sub = factor(sub, levels = new_order),
+         sub = case_when(sub == "acetate" ~ "Acetate",
+                         sub == "butyrate" ~ "Butyrate",
+                         TRUE ~ sub)) %>%
+  ggplot(aes(x = sub, y = new_val, fill = sub)) +
+  # Set width to 1 to make them touch
+  geom_col(color = "black", width = 1, linewidth = 0.1) + 
+  geom_errorbar(aes(ymin = new_val - new_se, 
+                    ymax = new_val + new_se), 
+                width = 0.1,
+                linewidth = 0.2) +
+  scale_fill_manual(values = c("#ff6e66", "#ffcfcc", "#ff9e99",  "#ffaf4d", "#ffc680", "#ffddb3", "#ffe8cc")) +
+  geom_hline(yintercept = 0, linewidth = 0.5) +
+  labs(y = expression("log"[10]*"Epistatic effect (EE)")) +
+  ylim(-1.5, 1.5) +
+  theme_classic() +
+    theme(
+    legend.position = "none",
+    panel.border = element_rect(fill = NA, color = "black", linewidth = 0.3),
+    axis.line = element_line(linewidth=0),
+    axis.ticks = element_line(linewidth = 0.25),
+    axis.title = element_text(size = 5),
+    axis.title.x = element_blank(),
+    axis.title.y = element_text(size = 5),
+    axis.text.y = element_text(size = 5),
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 5)
+  )
+
+bar_plot
+
+ggsave("fig_6_2nh_233-254.svg", plot = bar_plot, width = 180/6, height = 180/6, dpi = 600, units = "mm")
+```
+
+### 306-313 esters
+
+```{r}
+bar_plot <- test_ees %>%
+  filter(geno == "0000xx" & # 233-254
+         (sub == "2NH" | sub == "acetate" | sub == "butyrate" |
+            sub == "POE" | sub == "PTE" | sub == "POM" | sub == "PTM")) %>%
+  mutate(sub = factor(sub, levels = new_order),
+         sub = case_when(sub == "acetate" ~ "Acetate",
+                         sub == "butyrate" ~ "Butyrate",
+                         TRUE ~ sub)) %>%
+  ggplot(aes(x = sub, y = new_val, fill = sub)) +
+  # Set width to 1 to make them touch
+  geom_col(color = "black", width = 1, linewidth = 0.1) + 
+  geom_errorbar(aes(ymin = new_val - new_se, 
+                    ymax = new_val + new_se), 
+                width = 0.1,
+                linewidth = 0.2) +
+  scale_fill_manual(values = c("#ff6e66", "#ffcfcc", "#ff9e99",  "#ffaf4d", "#ffc680", "#ffddb3", "#ffe8cc")) +
+  geom_hline(yintercept = 0, linewidth = 0.5) +
+  labs(y = expression("log"[10]*"Epistatic effect (EE)")) +
+  ylim(-0.8, 0.8) +
+  theme_classic() +
+    theme(
+    legend.position = "none",
+    panel.border = element_rect(fill = NA, color = "black", linewidth = 0.3),
+    axis.line = element_line(linewidth=0),
+    axis.ticks = element_line(linewidth = 0.25),
+    axis.title = element_text(size = 5),
+    axis.title.x = element_blank(),
+    axis.title.y = element_text(size = 5),
+    axis.text.y = element_text(size = 5),
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 5)
+  )
+
+bar_plot
+
+ggsave("fig_6_2nh_306-313.svg", plot = bar_plot, width = 180/6, height = 180/6, dpi = 600, units = "mm")
+```
+
+### 271-306-313 esters
+
+```{r}
+bar_plot <- test_ees %>%
+  filter(geno == "00x0xx" & # 233-254
+         (sub == "2NH" | sub == "acetate" | sub == "butyrate" |
+            sub == "POE" | sub == "PTE" | sub == "POM" | sub == "PTM")) %>%
+  mutate(sub = factor(sub, levels = new_order),
+         sub = case_when(sub == "acetate" ~ "Acetate",
+                         sub == "butyrate" ~ "Butyrate",
+                         TRUE ~ sub)) %>%
+  ggplot(aes(x = sub, y = new_val, fill = sub)) +
+  # Set width to 1 to make them touch
+  geom_col(color = "black", width = 1, linewidth = 0.1) + 
+  geom_errorbar(aes(ymin = new_val - new_se, 
+                    ymax = new_val + new_se), 
+                width = 0.1,
+                linewidth = 0.2) +
+  scale_fill_manual(values = c("#ff6e66", "#ffcfcc", "#ff9e99",  "#ffaf4d", "#ffc680", "#ffddb3", "#ffe8cc")) +
+  geom_hline(yintercept = 0, linewidth = 0.5) +
+  labs(y = expression("log"[10]*"Epistatic effect (EE)")) +
+  ylim(-1.5, 1.5) +
+  theme_classic() +
+    theme(
+    legend.position = "none",
+    panel.border = element_rect(fill = NA, color = "black", linewidth = 0.3),
+    axis.line = element_line(linewidth=0),
+    axis.ticks = element_line(linewidth = 0.25),
+    axis.title = element_text(size = 5),
+    axis.title.x = element_blank(),
+    axis.title.y = element_text(size = 5),
+    axis.text.y = element_text(size = 5),
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 5)
+  )
+
+bar_plot
+
+ggsave("fig_6_2nh_271-306-313.svg", plot = bar_plot, width = 180/6, height = 180/6, dpi = 600, units = "mm")
+```
+
+### 254-271 OPs
+
+```{r}
+bar_plot <- test_ees %>%
+  filter(geno == "0xx000" &
+         (sub == "POE" | sub == "PTE" | sub == "POM" | sub == "PTM")) %>%
+  mutate(sub = factor(sub, levels = new_order),
+         sub = case_when(sub == "acetate" ~ "Acetate",
+                         sub == "butyrate" ~ "Butyrate",
+                         TRUE ~ sub)) %>%
+  ggplot(aes(x = sub, y = new_val, fill = sub)) +
+  # Set width to 1 to make them touch
+  geom_col(color = "black", width = 1, linewidth = 0.1) + 
+  geom_errorbar(aes(ymin = new_val - new_se, 
+                    ymax = new_val + new_se), 
+                width = 0.1,
+                linewidth = 0.2) +
+  scale_fill_manual(values = c("#ffaf4d", "#ffc680", "#ffddb3", "#ffe8cc")) +
+  geom_hline(yintercept = 0, linewidth = 0.5) +
+  labs(y = expression("log"[10]*"Epistatic effect (EE)")) +
+  ylim(-1.5, 1.5) +
+  theme_classic() +
+    theme(
+    legend.position = "none",
+    panel.border = element_rect(fill = NA, color = "black", linewidth = 0.3),
+    axis.line = element_line(linewidth=0),
+    axis.ticks = element_line(linewidth = 0.25),
+    axis.title = element_text(size = 5),
+    axis.title.x = element_blank(),
+    axis.title.y = element_text(size = 5),
+    axis.text.y = element_text(size = 5),
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 5)
+  )
+
+bar_plot
+
+ggsave("fig_6_poe_254-271.svg", plot = bar_plot, width = 180/6, height = 180/6, dpi = 600, units = "mm")
+```
+
+### 233-254 OPs
+
+```{r}
+bar_plot <- test_ees %>%
+  filter(geno == "xx0000" &
+         (sub == "2NH" | sub == "acetate" | sub == "butyrate" |
+            sub == "POE" | sub == "PTE" | sub == "POM" | sub == "PTM")) %>%
+  mutate(sub = factor(sub, levels = new_order),
+         sub = case_when(sub == "acetate" ~ "Acetate",
+                         sub == "butyrate" ~ "Butyrate",
+                         TRUE ~ sub)) %>%
+  ggplot(aes(x = sub, y = new_val, fill = sub)) +
+  # Set width to 1 to make them touch
+  geom_col(color = "black", width = 1, linewidth = 0.1) + 
+  geom_errorbar(aes(ymin = new_val - new_se, 
+                    ymax = new_val + new_se), 
+                width = 0.1,
+                linewidth = 0.2) +
+  scale_fill_manual(values = c("#ff6e66", "#ffcfcc", "#ff9e99",  "#ffaf4d", "#ffc680", "#ffddb3", "#ffe8cc")) +
+  geom_hline(yintercept = 0, linewidth = 0.5) +
+  labs(y = expression("log"[10]*"Epistatic effect (EE)")) +
+  ylim(-1.5, 1.5) +
+  theme_classic() +
+    theme(
+    legend.position = "none",
+    panel.border = element_rect(fill = NA, color = "black", linewidth = 0.3),
+    axis.line = element_line(linewidth=0),
+    axis.ticks = element_line(linewidth = 0.25),
+    axis.title = element_text(size = 5),
+    axis.title.x = element_blank(),
+    axis.title.y = element_text(size = 5),
+    axis.text.y = element_text(size = 5),
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 5)
+  )
+
+bar_plot
+
+ggsave("fig_6_poe_233-254.svg", plot = bar_plot, width = 180/6, height = 180/6, dpi = 600, units = "mm")
+```
+
+### 233-313 OPs
+
+```{r}
+bar_plot <- test_ees %>%
+  filter(geno == "x0000x" &
+         (sub == "POE" | sub == "PTE" | sub == "POM" | sub == "PTM")) %>%
+  mutate(sub = factor(sub, levels = new_order),
+         sub = case_when(sub == "acetate" ~ "Acetate",
+                         sub == "butyrate" ~ "Butyrate",
+                         TRUE ~ sub)) %>%
+  ggplot(aes(x = sub, y = new_val, fill = sub)) +
+  # Set width to 1 to make them touch
+  geom_col(color = "black", width = 1, linewidth = 0.1) + 
+  geom_errorbar(aes(ymin = new_val - new_se, 
+                    ymax = new_val + new_se), 
+                width = 0.1,
+                linewidth = 0.2) +
+  scale_fill_manual(values = c("#ffaf4d", "#ffc680", "#ffddb3", "#ffe8cc")) +
+  geom_hline(yintercept = 0, linewidth = 0.5) +
+  labs(y = expression("log"[10]*"Epistatic effect (EE)")) +
+  ylim(-0.5, 0.5) +
+  theme_classic() +
+    theme(
+    legend.position = "none",
+    panel.border = element_rect(fill = NA, color = "black", linewidth = 0.3),
+    axis.line = element_line(linewidth=0),
+    axis.ticks = element_line(linewidth = 0.25),
+    axis.title = element_text(size = 5),
+    axis.title.x = element_blank(),
+    axis.title.y = element_text(size = 5),
+    axis.text.y = element_text(size = 5),
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 5)
+  )
+
+bar_plot
+
+ggsave("fig_6_poe_233-313.svg", plot = bar_plot, width = 180/6, height = 180/6, dpi = 600, units = "mm")
+```
+
+### 254-306 OPs
+
+PTE suffers from 254 and 306, the other OPs suffer only from 306 (aside POE). PTE seems to really bounce back in this background.
+
+```{r}
+bar_plot <- test_ees %>%
+  filter(geno == "0x00x0" &
+         (sub == "POE" | sub == "PTE" | sub == "POM" | sub == "PTM")) %>%
+  mutate(sub = factor(sub, levels = new_order),
+         sub = case_when(sub == "acetate" ~ "Acetate",
+                         sub == "butyrate" ~ "Butyrate",
+                         TRUE ~ sub)) %>%
+  ggplot(aes(x = sub, y = new_val, fill = sub)) +
+  # Set width to 1 to make them touch
+  geom_col(color = "black", width = 1, linewidth = 0.1) + 
+  geom_errorbar(aes(ymin = new_val - new_se, 
+                    ymax = new_val + new_se), 
+                width = 0.1,
+                linewidth = 0.2) +
+  scale_fill_manual(values = c("#ffaf4d", "#ffc680", "#ffddb3", "#ffe8cc")) +
+  geom_hline(yintercept = 0, linewidth = 0.5) +
+  labs(y = expression("log"[10]*"Epistatic effect (EE)")) +
+  ylim(-2.2, 2.2) +
+  theme_classic() +
+    theme(
+    legend.position = "none",
+    panel.border = element_rect(fill = NA, color = "black", linewidth = 0.3),
+    axis.line = element_line(linewidth=0),
+    axis.ticks = element_line(linewidth = 0.25),
+    axis.title = element_text(size = 5),
+    axis.title.x = element_blank(),
+    axis.title.y = element_text(size = 5),
+    axis.text.y = element_text(size = 5),
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 5)
+  )
+
+bar_plot
+
+ggsave("fig_6_poe_254-306.svg", plot = bar_plot, width = 180/6, height = 180/6, dpi = 600, units = "mm")
+```
+
+### 233-254-271 OPs
+
+```{r}
+bar_plot <- test_ees %>%
+  filter(geno == "xxx000" &
+         (sub == "POE" | sub == "PTE" | sub == "POM" | sub == "PTM")) %>%
+  mutate(sub = factor(sub, levels = new_order),
+         sub = case_when(sub == "acetate" ~ "Acetate",
+                         sub == "butyrate" ~ "Butyrate",
+                         TRUE ~ sub)) %>%
+  ggplot(aes(x = sub, y = new_val, fill = sub)) +
+  # Set width to 1 to make them touch
+  geom_col(color = "black", width = 1, linewidth = 0.1) + 
+  geom_errorbar(aes(ymin = new_val - new_se, 
+                    ymax = new_val + new_se), 
+                width = 0.1,
+                linewidth = 0.2) +
+  scale_fill_manual(values = c("#ffaf4d", "#ffc680", "#ffddb3", "#ffe8cc")) +
+  geom_hline(yintercept = 0, linewidth = 0.5) +
+  labs(y = expression("log"[10]*"Epistatic effect (EE)")) +
+  ylim(-1.2, 1.2) +
+  theme_classic() +
+    theme(
+    legend.position = "none",
+    panel.border = element_rect(fill = NA, color = "black", linewidth = 0.3),
+    axis.line = element_line(linewidth=0),
+    axis.ticks = element_line(linewidth = 0.25),
+    axis.title = element_text(size = 5),
+    axis.title.x = element_blank(),
+    axis.title.y = element_text(size = 5),
+    axis.text.y = element_text(size = 5),
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 5)
+  )
+
+bar_plot
+
+ggsave("fig_6_poe_233-254-271.svg", plot = bar_plot, width = 180/6, height = 180/6, dpi = 600, units = "mm")
+```
+
+### 271-306-313 OPs
+
+```{r}
+bar_plot <- test_ees %>%
+  filter(geno == "00x0xx" &
+         (sub == "POE" | sub == "PTE" | sub == "POM" | sub == "PTM")) %>%
+  mutate(sub = factor(sub, levels = new_order),
+         sub = case_when(sub == "acetate" ~ "Acetate",
+                         sub == "butyrate" ~ "Butyrate",
+                         TRUE ~ sub)) %>%
+  ggplot(aes(x = sub, y = new_val, fill = sub)) +
+  # Set width to 1 to make them touch
+  geom_col(color = "black", width = 1, linewidth = 0.1) + 
+  geom_errorbar(aes(ymin = new_val - new_se, 
+                    ymax = new_val + new_se), 
+                width = 0.1,
+                linewidth = 0.2) +
+  scale_fill_manual(values = c("#ffaf4d", "#ffc680", "#ffddb3", "#ffe8cc")) +
+  geom_hline(yintercept = 0, linewidth = 0.5) +
+  labs(y = expression("log"[10]*"Epistatic effect (EE)")) +
+  ylim(-1.2, 1.2) +
+  theme_classic() +
+    theme(
+    legend.position = "none",
+    panel.border = element_rect(fill = NA, color = "black", linewidth = 0.3),
+    axis.line = element_line(linewidth=0),
+    axis.ticks = element_line(linewidth = 0.25),
+    axis.title = element_text(size = 5),
+    axis.title.x = element_blank(),
+    axis.title.y = element_text(size = 5),
+    axis.text.y = element_text(size = 5),
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 5)
+  )
+
+bar_plot
+
+ggsave("fig_6_poe_271-306-313.svg", plot = bar_plot, width = 180/6, height = 180/6, dpi = 600, units = "mm")
+```
+
+### Correlation of butyrate to POM and POE
+
+```{r}
+test_ees %>%
+  filter(sub %in% c("butyrate", "PTM", "PTE")) %>%
+  mutate(sub_class = case_when(
+    sub == "butyrate" ~ "ester",
+    TRUE ~ "OP"
+  )) %>%
+  group_by(geno, sub) %>% 
+  summarise(new_val = mean(new_val, na.rm = TRUE), .groups = "drop") %>% # Change mean to sum/max as needed
+  pivot_wider(names_from = sub, values_from = new_val) %>%
+  pivot_longer(cols = c("PTM", "PTE")) %>%
+  ggplot(aes(x = butyrate, y = value, color = name)) +
+  geom_point() + 
+  geom_hline(yintercept = 0, linewidth = 0.5) +
+  geom_abline(slope = 1, intercept = 0, linewidth = 0.3, lty = 2) +
+  labs(x = expression("log"[10]*"Epistatic effect (EE) Butyrate"),
+       y = expression("log"[10]*"Epistatic effect (EE) OP")) +
+  theme_classic() +
+    theme(
+    #legend.position = "none",
+    panel.border = element_rect(fill = NA, color = "black", linewidth = 0.3),
+    axis.line = element_line(linewidth=0),
+    axis.ticks = element_line(linewidth = 0.25),
+    axis.title = element_text(size = 5),
+    axis.title.x = element_text(size = 5),
+    axis.title.y = element_text(size = 5),
+    axis.text.y = element_text(size = 5),
+    axis.text.x = element_text(size = 5)
+  )
+```
+
+
+## Epistatic coefficients across substrates
+
+Quick heat map plotting
+
+```{r}
+heat_map_order <- c("2NH", "acetate", "butyrate", "POE", "POM", "PTE", "PTM", "DHC", "TBBL")
+
+tile_2 <- test_ees %>%
+  mutate(
+    sig = ifelse(is.na(sig), FALSE, sig),
+    geno = fct_reorder(geno, muts),
+    sub = case_when(sub == "tbbl" ~ "TBBL", TRUE ~ sub),
+    sub = factor(sub, levels = rev(heat_map_order))
+  ) %>%
+  ggplot(aes(x = geno, y = sub, fill = new_val)) +
+  # Black border for significance, light grey for others to match the screenshot "grid" look
+  geom_tile(aes(color = sig), width = 0.9, height = 0.9, linewidth = 0.3) +
+  # Moving X axis to the top
+  scale_x_discrete(position = "top") +
+  scale_fill_gradient2(
+    low = "#1F78B4", mid = "white", high = "#E31A1C",
+    midpoint = mean(test_ees$new_val, na.rm = TRUE)
+  ) +
+  scale_color_manual(values = c("TRUE" = "black", "FALSE" = "grey90")) +
+  theme_minimal() +
+  theme(
+    # 45 degree tilt, adjusted for top position
+    axis.text.x.top = element_text(angle = 45, hjust = 0, vjust = 0, size = 6),
+    axis.title.y = element_blank(),
+    axis.text.y = element_text(size = 6),
+    panel.grid = element_blank(),
+    legend.position = "bottom",
+    legend.text = element_text(size = 8)
+  ) +
+  labs(x = "Genotype", 
+       fill = "Epistatic effect (EE)") +
+  coord_fixed()
+
+tile_2
+
+# Clean figure
+ggsave("fig_4_c.svg", plot = tile_2 + theme(legend.position = "none"), width = 180, height = 247/3, dpi = 600, units = "mm")
+# With legend for reference
+ggsave("fig_4_c_legend.svg", plot = tile_2, width = 180, height = 247/3, dpi = 600, units = "mm")
+
+```
+
+### SMEs distribution
+
+It is worth understanding the single mutational effects across backgrounds:
+
+```{r coef-by-sub-1st}
+sme_sub_fig <- test_ees %>%
+  mutate(sub = factor(sub, levels = c("2NH", "acetate", "butyrate", "DHC", "tbbl", "PTM", "PTE", "POM", "POE"))) %>%
+  filter(muts == 1) %>%
+  ggplot(aes(x=sub, y = new_val)) +
+  geom_point() +
+  geom_errorbar(aes(ymin=new_val-new_se, ymax=new_val+new_se), width=.2, position=position_dodge(.9)) +
+  geom_hline(yintercept = 0, lty = 2) +
+  facet_wrap(~geno) +
+  theme_classic() +
+  labs(x = "Substrate", y = "Epistasis") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+sme_sub_fig
+
+##ggsave("sme_sub_fig.svg", plot = sme_sub_fig, width = 180, height = 247/2, dpi = 300, units = "mm")
+```
+
+It is worth visualizing how each epistatic coefficient looks for each substrate. Here I can order them by class (esters, lactonse, OPs), then visualize the changes in the magnitude of the epistatic coefficient. Red represents non-sigificant points while blue represents significant.
+
+```{r coef-by-sub-2nd}
+ee2_sub_fig <- test_ees %>%
+  mutate(sub = factor(sub, levels = c("2NH", "acetate", "butyrate", "DHC", "tbbl", "PTM", "PTE", "POM", "POE"))) %>%
+  filter(muts == 2) %>%
+  ggplot(aes(x=sub, y = new_val, color = sig)) +
+  geom_point() +
+  geom_errorbar(aes(ymin=new_val-new_se, ymax=new_val+new_se), width=.2, position=position_dodge(.9)) +
+  geom_hline(yintercept = 0, lty = 2) +
+  facet_wrap(~geno) +
+  theme_classic() +
+  labs(x = "Substrate", y = "Epistasis") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1), legend.position = "none")
+
+ee2_sub_fig
+
+##ggsave("ee2_sub_figb_fig.svg", plot = ee2_sub_fig, width = 180, height = 247/2, dpi = 300, units = "mm")
+```
+
+Now by 3rd order
+
+```{r coef-by-sub-3rd}
+ee3_sub_fig <- test_ees %>%
+  mutate(sub = factor(sub, levels = c("2NH", "acetate", "butyrate", "DHC", "tbbl", "PTM", "PTE", "POM", "POE"))) %>%
+  filter(muts == 3) %>%
+  ggplot(aes(x=sub, y = new_val, color = sig)) +
+  geom_point() +
+  geom_errorbar(aes(ymin=new_val-new_se, ymax=new_val+new_se), width=.2, position=position_dodge(.9)) +
+  geom_hline(yintercept = 0, lty = 2) +
+  facet_wrap(~geno) +
+  theme_classic() +
+  labs(x = "Substrate", y = "Epistasis") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1), legend.position = "none")
+
+ee3_sub_fig
+
+##ggsave("ee3_sub_figb_fig.svg", plot = ee3_sub_fig, width = 180, height = 247/2, dpi = 300, units = "mm")
+```
+
+Now by 4th order
+
+```{r coef-by-sub-4th}
+ee4_sub_fig <- test_ees %>%
+  mutate(sub = factor(sub, levels = c("2NH", "acetate", "butyrate", "DHC", "tbbl", "PTM", "PTE", "POM", "POE"))) %>%
+  filter(muts == 4) %>%
+  ggplot(aes(x=sub, y = new_val, color = sig)) +
+  geom_point() +
+  geom_errorbar(aes(ymin=new_val-new_se, ymax=new_val+new_se), width=.2, position=position_dodge(.9)) +
+  geom_hline(yintercept = 0, lty = 2) +
+  facet_wrap(~geno) +
+  theme_classic() +
+  labs(x = "Substrate", y = "Epistasis") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1), legend.position = "none")
+
+ee4_sub_fig
+
+##ggsave("ee4_sub_figb_fig.svg", plot = ee4_sub_fig, width = 180, height = 247/2, dpi = 300, units = "mm")
+```
+
+Finally 5th order
+
+```{r coef-by-sub-5th}
+ee5_sub_fig <- test_ees %>%
+  mutate(sub = factor(sub, levels = c("2NH", "acetate", "butyrate", "DHC", "tbbl", "PTM", "PTE", "POM", "POE"))) %>%
+  filter(muts == 5) %>%
+  ggplot(aes(x=sub, y = new_val, color = sig)) +
+  geom_point() +
+  geom_errorbar(aes(ymin=new_val-new_se, ymax=new_val+new_se), width=.2, position=position_dodge(.9)) +
+  geom_hline(yintercept = 0, lty = 2) +
+  facet_wrap(~geno) +
+  theme_classic() +
+  labs(x = "Substrate", y = "Epistasis") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1), legend.position = "none")
+
+ee5_sub_fig
+
+##ggsave("ee5_sub_figb_fig.svg", plot = ee5_sub_fig, width = 180, height = 247/2, dpi = 300, units = "mm")
+```
+
+We can also plot them by epistatic coefficient to look at the breadth of distribution across substrates. Large spread indicates significantly different wiring for the SME or EE across substrates:
+
+```{r coef-by-geno-and-sub-1st}
+sme_sub_fig_2 <- test_ees %>%
+  mutate(sub = factor(sub, levels = c("2NH", "acetate", "butyrate", "DHC", "tbbl", "POE", "PTE", "POM", "PTM")),
+         geno = factor(geno)) %>%
+  filter(muts == 1) %>%
+  ggplot(aes(x = geno, y = new_val, fill = sub)) +
+  geom_hline(yintercept = 0, lty = 2) +
+  geom_point(pch = 21, size = 2, stroke = 0.5) +
+  #geom_errorbar(aes(ymin=new_val-new_se, ymax=new_val+new_se), width=.2, position=position_dodge(.9)) +
+  ylim(c(-2.5, 2.5)) +
+  scale_fill_manual(values = c("#ff6e66", "#ff9e99", "#ffcfcc", "#80b9ff", "#b3d5ff", "#ffaf4d", "#ffc680", "#ffddb3", "#ffe8cc")) +
+  theme_classic() +
+  labs(x = "Genotype", y = expression('log'[10]*' Single mutational effect'), fill = "Substrate") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+sme_sub_fig_2
+
+##ggsave("sme_sub_fig_2.svg", plot = sme_sub_fig_2, width = 180, height = 247/2, dpi = 300, units = "mm")
+```
+```{r coef-by-geno-and-sub-2nd}
+ee2_sub_fig_2 <- test_ees %>%
+  mutate(sub = factor(sub, levels = c("2NH", "acetate", "butyrate", "DHC", "tbbl", "POE", "PTE", "POM", "PTM")),
+         geno = factor(geno)) %>%
+  filter(muts == 2) %>%
+  ggplot(aes(x = geno, y = new_val, fill = sub)) +
+  geom_hline(yintercept = 0, lty = 2) +
+  geom_point(pch = 21, size = 2, stroke = 0.5) +
+  #geom_errorbar(aes(ymin=new_val-new_se, ymax=new_val+new_se), width=.2, position=position_dodge(.9)) +
+  ylim(c(-2.5, 2.5)) +
+  scale_fill_manual(values = c("#ff6e66", "#ff9e99", "#ffcfcc", "#80b9ff", "#b3d5ff", "#ffaf4d", "#ffc680", "#ffddb3", "#ffe8cc")) +
+  theme_classic() +
+  labs(x = "Genotype", y = expression('log'[10]*' Epistatic effect'), fill = "Substrate") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+ee2_sub_fig_2
+
+##ggsave("sme_sub_fig_2.svg", plot = sme_sub_fig_2, width = 180, height = 247/2, dpi = 300, units = "mm")
+```
+
+```{r coef-by-geno-and-sub-3rd}
+ee3_sub_fig_2 <- test_ees %>%
+  mutate(sub = factor(sub, levels = c("2NH", "acetate", "butyrate", "DHC", "tbbl", "POE", "PTE", "POM", "PTM")),
+         geno = factor(geno)) %>%
+  filter(muts == 3) %>%
+  ggplot(aes(x = geno, y = new_val, fill = sub)) +
+  geom_hline(yintercept = 0, lty = 2) +
+  geom_point(pch = 21, size = 2, stroke = 0.5) +
+  #geom_errorbar(aes(ymin=new_val-new_se, ymax=new_val+new_se), width=.2, position=position_dodge(.9)) +
+  ylim(c(-2.5, 2.5)) +
+  scale_fill_manual(values = c("#ff6e66", "#ff9e99", "#ffcfcc", "#80b9ff", "#b3d5ff", "#ffaf4d", "#ffc680", "#ffddb3", "#ffe8cc")) +
+  theme_classic() +
+  labs(x = "Genotype", y = expression('log'[10]*' Epistatic effect'), fill = "Substrate") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+ee3_sub_fig_2
+
+##ggsave("sme_sub_fig_2.svg", plot = sme_sub_fig_2, width = 180, height = 247/2, dpi = 300, units = "mm")
+```
+
+```{r coef-by-geno-and-sub-4th}
+ee4_sub_fig_2 <- test_ees %>%
+  mutate(sub = factor(sub, levels = c("2NH", "acetate", "butyrate", "DHC", "tbbl", "POE", "PTE", "POM", "PTM")),
+         geno = factor(geno)) %>%
+  filter(muts == 4) %>%
+  ggplot(aes(x = geno, y = new_val, fill = sub)) +
+  geom_hline(yintercept = 0, lty = 2) +
+  geom_point(pch = 21, size = 2, stroke = 0.5) +
+  #geom_errorbar(aes(ymin=new_val-new_se, ymax=new_val+new_se), width=.2, position=position_dodge(.9)) +
+  ylim(c(-2.5, 2.5)) +
+  scale_fill_manual(values = c("#ff6e66", "#ff9e99", "#ffcfcc", "#80b9ff", "#b3d5ff", "#ffaf4d", "#ffc680", "#ffddb3", "#ffe8cc")) +
+  theme_classic() +
+  labs(x = "Genotype", y = expression('log'[10]*' Epistatic effect'), fill = "Substrate") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+ee4_sub_fig_2
+
+##ggsave("sme_sub_fig_2.svg", plot = sme_sub_fig_2, width = 180, height = 247/2, dpi = 300, units = "mm")
+```
+
+```{r coef-by-geno-and-sub-5th}
+ee5_sub_fig_2 <- test_ees %>%
+  mutate(sub = factor(sub, levels = c("2NH", "acetate", "butyrate", "DHC", "tbbl", "POE", "PTE", "POM", "PTM")),
+         geno = factor(geno)) %>%
+  filter(muts == 5) %>%
+  ggplot(aes(x = geno, y = new_val, fill = sub)) +
+  geom_hline(yintercept = 0, lty = 2) +
+  geom_point(pch = 21, size = 2, stroke = 0.5) +
+  #geom_errorbar(aes(ymin=new_val-new_se, ymax=new_val+new_se), width=.2, position=position_dodge(.9)) +
+  ylim(c(-2.5, 2.5)) +
+  scale_fill_manual(values = c("#ff6e66", "#ff9e99", "#ffcfcc", "#80b9ff", "#b3d5ff", "#ffaf4d", "#ffc680", "#ffddb3", "#ffe8cc")) +
+  theme_classic() +
+  labs(x = "Genotype", y = expression('log'[10]*' Epistatic effect'), fill = "Substrate") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+ee5_sub_fig_2
+
+##ggsave("sme_sub_fig_2.svg", plot = sme_sub_fig_2, width = 180, height = 247/2, dpi = 300, units = "mm")
+```
+
+
+### Exporting files for visualization in PyMol
+
+The csvs are then individually processed to plot 1st, 2nd, 3rd, 4th, and 5th order information in a .pse session in PyMol.
+
+```{r exporting-test-ees-by-sub}
+test_ees_pos <- test_ees %>%
+  select(new_val, sig, sub, geno) %>%
+  separate(geno, into = letters[1:7], sep = "", remove = F) %>% # not sure why "a" has nothing
+  select(-c(a)) %>% # so I just drop it
+  mutate(b = if_else(b == 0, NA, "233"),
+     c = if_else(c == 0, NA, "254"),
+     d = if_else(d == 0, NA, "271"),
+     e = if_else(e == 0, NA, "272"),
+     f = if_else(f == 0, NA, "306"),
+     g = if_else(g == 0, NA, "313")) %>%
+  unite("positions", b:g, sep = "|", na.rm = T)
+
+# Loop by substrate, keep it in the csv name but remove it from the datafarme
+
+for(i in 1:length(unique(test_ees_pos$sub))) {
+  cur_sub = unique(test_ees_pos$sub)[i]
+  
+  test_ees_pos %>%
+    filter(sub == cur_sub) %>%
+    select(-c(sub)) %>%
+    write_csv(., file = paste(cur_sub, "_ee_list.csv", sep = ""))
+}
+
+```
+
+## Normalizing bespoke pairs by single substrate
+
+Another approach to "treating different substrates as mutations" can be achieved by normalizing initial rate data to a common substrate. Although this makes the analysis tricky when dealing with all substrates sets, due to the strong magnitude skew from paraoxon rate, some chosen substrates can be treated this way.
+
+### Paraoxon-ethyl (POE) vs Paraoxon-methyl (POM)
+
+```{r poe-vs-pom}
+poe_pom_data <- processed_data %>%
+  filter(substrate %in% c("POE", "POM")) %>%
+  mutate(substrate = case_when(substrate == "POE" ~ 0, substrate == "POM" ~ 1)) %>%
+  select(-c(replicate, exp_day, plate_id))
+
+poe_pom_wt_mean <- mean(poe_pom_data %>% filter(if_all(1:7, ~. == 0)) %>% pull(activity))
+
+poe_pom_norm_data <- poe_pom_data %>%
+  mutate(activity = activity/poe_pom_wt_mean,
+         log.activity = log10(activity))
+```
+
+After constructing the data, we can visualize the distribution based on different substrate:
+
+```{r poe-vs-pom-plot-1}
+poe_pom_box_fig <- poe_pom_norm_data %>%
+  group_by(p233, p254, p271, p272, p306, p313, substrate, reference) %>%
+  summarize(log.activity = mean(log.activity)) %>%
+  ungroup() %>%
+  mutate(substrate = case_when(substrate == 0 ~ "POE", substrate == 1 ~ "POM")) %>%
+  ggplot(aes(x = substrate, y = log.activity)) +
+  geom_boxplot() +
+  geom_line(aes(group=reference), color = "grey", alpha = 0.5) + # clever way to connect points between group
+  geom_point(size = 1) +
+  geom_hline(yintercept = 0, lty = 2) +
+  labs(x = "Substrate", y = expression("log"[10]*" fold-change")) +
+  theme_classic()
+
+poe_pom_box_fig
+
+##ggsave("poe_pom_box_fig.svg", plot = poe_pom_box_fig, width = 180/2, height = 247/3, dpi = 300, units = "mm")
+```
+
+This plot essentially outlines the single mutational effects of "mutating" paraoxon-ethyl into paraoxon-methyl, and the scale is accurate as it has all been normalized to wt with paraoxon. ***It will be worth taking those "slopes" (which are ratios) and figuring out which genotypes are more or less tolerant to methyl substitution.***
+
+This can be further explored by looking into "epistasis" between a "mutation" from POE to POM and mutation(s) at other amino acids. I can use the same pipeline for error propagation as I have before (need to clean up some of my mean calculation post 2 substrate normalization) to then analyze significant epistasis between a substrate and position. ***ACTUALLY, I don't think I have to do this. Since I have epistasis data for each substrate normalized to itself, the epistasis information should still hold?***
+
+#### Slope extraction
+
+I can try to look at the slopes of the normalized points, and compare them to their relative epistasis values. I can plot EE of POE on the x-axis, EE of POM on the y-axis, and color gradient the slope with positive values indicating that the "non-native" substrate has a better activity than native.
+
+```{r poe-vs-pom-slope-extract}
+poe_pom_corr <- poe_pom_norm_data %>%
+  group_by(p233, p254, p271, p272, p306, p313, substrate, reference) %>%
+  summarize(log.activity = mean(log.activity)) %>%
+  ungroup() %>%
+  mutate(across(1:6, ~ case_when(. == 0 ~ '0', . == 1 ~ 'x'))) %>%
+  unite("geno", p233:p313, sep = "") %>%
+  pivot_wider(names_from = substrate, values_from = log.activity) %>%
+  mutate(slope = `1` - `0`) %>%
+  select(geno, reference, slope) %>%
+  merge(., test_ees %>% filter(sub %in% c("POE", "POM")) %>% select(geno, sub, new_val) %>% pivot_wider(names_from = sub, values_from = new_val), by = c("geno") ) %>%
+  ggplot(aes(x = POE, y = POM, color = slope, label = geno)) +
+  geom_point() +
+  geom_abline(intercept = 0, slope = 1, lty = 2, col = "grey") +
+  geom_vline(xintercept = 0, lty = 2, col = "grey") +
+  geom_hline(yintercept = 0, lty = 2, col = "grey") +
+  scale_colour_gradient(
+    low = "red",
+    high = "green",
+  ) +
+  theme_classic()
+
+poe_pom_corr
+
+##ggsave("poe_pom_corr_fig.svg", plot = poe_pom_corr, width = 180/2, height = 247/3, dpi = 300, units = "mm")
+```
+
+We can also visualize it with labels for easier inspection of genotypes:
+
+```{r poe-vs-pom-slope-extract-2}
+poe_pom_corr_lab <- poe_pom_corr + geom_text_repel(size = 2, max.overlaps = Inf)
+
+poe_pom_corr_lab
+
+##ggsave("poe_pom_corr_lab_fig.svg", plot = poe_pom_corr_lab, width = 180/2, height = 247/3, dpi = 300, units = "mm")
+```
+
+### Paraoxon-ethyl (POE) vs Parathion-ethyl (PTE)
+
+```{r poe-vs-pte}
+poe_pte_data <- processed_data %>%
+  filter(substrate %in% c("POE", "PTE")) %>%
+  mutate(substrate = case_when(substrate == "POE" ~ 0, substrate == "PTE" ~ 1)) %>%
+  select(-c(replicate, exp_day, plate_id))
+
+poe_pte_wt_mean <- mean(poe_pte_data %>% filter(if_all(1:7, ~. == 0)) %>% pull(activity))
+
+poe_pte_norm_data <- poe_pte_data %>%
+  mutate(activity = activity/poe_pte_wt_mean,
+         log.activity = log10(activity))
+```
+
+After constructing the data, we can visualize the distribution based on different substrate:
+
+```{r poe-vs-pte-plot-1}
+poe_pte_box_fig <- poe_pte_norm_data %>%
+  group_by(p233, p254, p271, p272, p306, p313, substrate, reference) %>%
+  summarize(log.activity = mean(log.activity)) %>%
+  ungroup() %>%
+  mutate(substrate = case_when(substrate == 0 ~ "POE", substrate == 1 ~ "PTE")) %>%
+  ggplot(aes(x = substrate, y = log.activity)) +
+  geom_boxplot() +
+  geom_line(aes(group=reference), color = "grey", alpha = 0.5) + # clever way to connect points between group
+  geom_point(size = 1) +
+  geom_hline(yintercept = 0, lty = 2) +
+  labs(x = "Substrate", y = expression("log"[10]*" fold-change")) +
+  theme_classic()
+
+poe_pte_box_fig
+
+##ggsave("poe_pte_box_fig.svg", plot = poe_pte_box_fig, width = 180/2, height = 247/3, dpi = 300, units = "mm")
+```
+
+These are definitely skewed as expected, less interesting information than with paraoxon-methyl.
+
+#### Slope extraction
+
+```{r poe-vs-pte-slope-extract}
+poe_pte_corr <- poe_pte_norm_data %>%
+  group_by(p233, p254, p271, p272, p306, p313, substrate, reference) %>%
+  summarize(log.activity = mean(log.activity)) %>%
+  ungroup() %>%
+  mutate(across(1:6, ~ case_when(. == 0 ~ '0', . == 1 ~ 'x'))) %>%
+  unite("geno", p233:p313, sep = "") %>%
+  pivot_wider(names_from = substrate, values_from = log.activity) %>%
+  mutate(slope = `1` - `0`) %>%
+  select(geno, reference, slope) %>%
+  merge(., test_ees %>% filter(sub %in% c("POE", "PTE")) %>% select(geno, sub, new_val) %>% pivot_wider(names_from = sub, values_from = new_val), by = c("geno") ) %>%
+  ggplot(aes(x = POE, y = PTE, color = slope, label = geno)) +
+  geom_point() +
+  geom_abline(intercept = 0, slope = 1, lty = 2, col = "grey") +
+  geom_vline(xintercept = 0, lty = 2, col = "grey") +
+  geom_hline(yintercept = 0, lty = 2, col = "grey") +
+  scale_colour_gradient(
+    low = "red",
+    high = "green",
+  ) +
+  theme_classic()
+
+poe_pte_corr
+
+##ggsave("poe_pte_corr_fig.svg", plot = poe_pte_corr, width = 180/2, height = 247/3, dpi = 300, units = "mm")
+```
+
+We can also visualize it with labels for easier inspection of genotypes:
+
+```{r poe-vs-pte-slope-extract-2}
+poe_pte_corr_lab <- poe_pte_corr + geom_text_repel(size = 2, max.overlaps = Inf)
+
+poe_pte_corr_lab
+
+##ggsave("poe_pte_corr_lab_fig.svg", plot = poe_pte_corr_lab, width = 180/2, height = 247/3, dpi = 300, units = "mm")
+```
+
+### 2-napthylhexanoate (2NH) vs Butyrate (butyrate)
+
+```{r 2NH-vs-butyrate}
+nh_but_data <- processed_data %>%
+  filter(substrate %in% c("2NH", "butyrate")) %>%
+  mutate(substrate = case_when(substrate == "2NH" ~ 0, substrate == "butyrate" ~ 1)) %>%
+  select(-c(replicate, exp_day, plate_id))
+
+nh_but_wt_mean <- mean(nh_but_data %>% filter(if_all(1:7, ~. == 0)) %>% pull(activity))
+
+nh_but_norm_data <- nh_but_data %>%
+  mutate(activity = activity/nh_but_wt_mean,
+         log.activity = log10(activity))
+```
+
+After constructing the data, we can visualize the distribution based on different substrate:
+
+```{r 2NH-vs-butyrate-plot-1}
+nh_but_box_fig <- nh_but_norm_data %>%
+  group_by(p233, p254, p271, p272, p306, p313, substrate, reference) %>%
+  summarize(log.activity = mean(log.activity)) %>%
+  ungroup() %>%
+  mutate(substrate = case_when(substrate == 0 ~ "2NH", substrate == 1 ~ "butyrate")) %>%
+  ggplot(aes(x = substrate, y = log.activity)) +
+  geom_boxplot() +
+  geom_line(aes(group=reference), color = "grey", alpha = 0.5) + # clever way to connect points between group
+  geom_point(size = 1) +
+  geom_hline(yintercept = 0, lty = 2) +
+  labs(x = "Substrate", y = expression("log"[10]*" fold-change")) +
+  theme_classic()
+
+nh_but_box_fig
+
+##ggsave("nh_but_box_fig.svg", plot = nh_but_box_fig, width = 180/2, height = 247/3, dpi = 300, units = "mm")
+```
+
+I forgot that lysate activity for butyrate is better than 2NH, this will make for an interesting investigation into epistasis.
+
+#### Slope extraction
+
+```{r 2NH-vs-butyrate-slope-extract}
+nh_but_corr <- nh_but_norm_data %>%
+  group_by(p233, p254, p271, p272, p306, p313, substrate, reference) %>%
+  summarize(log.activity = mean(log.activity)) %>%
+  ungroup() %>%
+  mutate(across(1:6, ~ case_when(. == 0 ~ '0', . == 1 ~ 'x'))) %>%
+  unite("geno", p233:p313, sep = "") %>%
+  pivot_wider(names_from = substrate, values_from = log.activity) %>%
+  mutate(slope = `1` - `0`) %>%
+  select(geno, reference, slope) %>%
+  merge(., test_ees %>% filter(sub %in% c("2NH", "butyrate")) %>% select(geno, sub, new_val) %>% pivot_wider(names_from = sub, values_from = new_val), by = c("geno") ) %>%
+  ggplot(aes(x = `2NH`, y = butyrate, color = slope, label = geno)) +
+  geom_point() +
+  geom_abline(intercept = 0, slope = 1, lty = 2, col = "grey") +
+  geom_vline(xintercept = 0, lty = 2, col = "grey") +
+  geom_hline(yintercept = 0, lty = 2, col = "grey") +
+  scale_colour_gradient(
+    low = "red",
+    high = "green",
+  ) +
+  theme_classic()
+
+nh_but_corr
+
+##ggsave("nh_but_corr_corr_fig.svg", plot = nh_but_corr, width = 180/2, height = 247/3, dpi = 300, units = "mm")
+```
+
+We can also visualize it with labels for easier inspection of genotypes:
+
+```{r 2nh-vs-but-slope-extract-2}
+nh_but_corr_lab <- nh_but_corr + geom_text_repel(size = 2, max.overlaps = Inf)
+
+nh_but_corr_lab
+
+##ggsave("nh_but_corr_lab_fig.svg", plot = nh_but_corr_lab, width = 180/2, height = 247/3, dpi = 300, units = "mm")
+```
+
+### Paraoxon-ethyl (POE) vs 2-napthylhexanoate (2NH)
+
+```{r poe-vs-2nh}
+poe_nh_data <- processed_data %>%
+  filter(substrate %in% c("POE", "2NH")) %>%
+  mutate(substrate = case_when(substrate == "POE" ~ 0, substrate == "2NH" ~ 1)) %>%
+  select(-c(replicate, exp_day, plate_id))
+
+poe_nh_wt_mean <- mean(poe_nh_data %>% filter(if_all(1:7, ~. == 0)) %>% pull(activity))
+
+poe_nh_norm_data <- poe_nh_data %>%
+  mutate(activity = activity/poe_nh_wt_mean,
+         log.activity = log10(activity))
+```
+
+After constructing the data, we can visualize the distribution based on different substrate:
+
+```{r poe-vs-2nh-plot-1}
+poe_2nh_box_fig <- poe_nh_norm_data %>%
+  group_by(p233, p254, p271, p272, p306, p313, substrate, reference) %>%
+  summarize(log.activity = mean(log.activity)) %>%
+  ungroup() %>%
+  mutate(substrate = case_when(substrate == 0 ~ "POE", substrate == 1 ~ "2NH")) %>%
+  ggplot(aes(x = substrate, y = log.activity)) +
+  geom_boxplot() +
+  geom_line(aes(group=reference), color = "grey", alpha = 0.5) + # clever way to connect points between group
+  geom_point(size = 1) +
+  geom_hline(yintercept = 0, lty = 2) +
+  labs(x = "Substrate", y = expression("log"[10]*" fold-change")) +
+  theme_classic()
+
+poe_2nh_box_fig
+
+##ggsave("poe_2nh_box_fig.svg", plot = poe_2nh_box_fig, width = 180/2, height = 247/3, dpi = 300, units = "mm")
+```
+
+Still interesting here to examine the ratios, and consider the epistasis at those genotypes.
+
+#### Slope extraction
+
+```{r POE-vs-2NH-slope-extract}
+poe_2nh_corr <- poe_nh_norm_data %>%
+  group_by(p233, p254, p271, p272, p306, p313, substrate, reference) %>%
+  summarize(log.activity = mean(log.activity)) %>%
+  ungroup() %>%
+  mutate(across(1:6, ~ case_when(. == 0 ~ '0', . == 1 ~ 'x'))) %>%
+  unite("geno", p233:p313, sep = "") %>%
+  pivot_wider(names_from = substrate, values_from = log.activity) %>%
+  mutate(slope = `1` - `0`) %>%
+  select(geno, reference, slope) %>%
+  merge(., test_ees %>% filter(sub %in% c("POE", "2NH")) %>% select(geno, sub, new_val) %>% pivot_wider(names_from = sub, values_from = new_val), by = c("geno") ) %>%
+  ggplot(aes(x = POE, y = `2NH`, color = slope, label = geno)) +
+  geom_point() +
+  geom_abline(intercept = 0, slope = 1, lty = 2, col = "grey") +
+  geom_vline(xintercept = 0, lty = 2, col = "grey") +
+  geom_hline(yintercept = 0, lty = 2, col = "grey") +
+  scale_colour_gradient(
+    low = "red",
+    high = "green",
+  ) +
+  theme_classic()
+
+poe_2nh_corr
+
+##ggsave("poe_2nh_corr_corr_fig.svg", plot = poe_2nh_corr, width = 180/2, height = 247/3, dpi = 300, units = "mm")
+```
+
+We can also visualize it with labels for easier inspection of genotypes:
+
+```{r poe-vs-2nh-slope-extract-2}
+poe_2nh_corr_lab <- poe_2nh_corr + geom_text_repel(size = 2, max.overlaps = Inf)
+
+poe_2nh_corr_lab
+
+##ggsave("poe_2nh_corr_lab_fig.svg", plot = poe_2nh_corr_lab, width = 180/2, height = 247/3, dpi = 300, units = "mm")
+```
+
+### Paraoxon-ethyl (POE) vs Parathion-methyl (PTM)
+
+```{r poe-vs-ptm}
+poe_ptm_data <- processed_data %>%
+  filter(substrate %in% c("POE", "PTM")) %>%
+  mutate(substrate = case_when(substrate == "POE" ~ 0, substrate == "PTM" ~ 1)) %>%
+  select(-c(replicate, exp_day, plate_id))
+
+poe_ptm_wt_mean <- mean(poe_ptm_data %>% filter(if_all(1:7, ~. == 0)) %>% pull(activity))
+
+poe_ptm_norm_data <- poe_ptm_data %>%
+  mutate(activity = activity/poe_ptm_wt_mean,
+         log.activity = log10(activity))
+```
+
+After constructing the data, we can visualize the distribution based on different substrate:
+
+```{r poe-vs-ptm-plot-1}
+poe_ptm_norm_data %>%
+  group_by(p233, p254, p271, p272, p306, p313, substrate, reference) %>%
+  summarize(log.activity = mean(log.activity)) %>%
+  ungroup() %>%
+  mutate(substrate = case_when(substrate == 0 ~ "POE", substrate == 1 ~ "PTM")) %>%
+  ggplot(aes(x = substrate, y = log.activity)) +
+  geom_boxplot() +
+  geom_line(aes(group=reference), color = "grey", alpha = 0.5) + # clever way to connect points between group
+  geom_point(size = 1) +
+  geom_hline(yintercept = 0, lty = 2) +
+  labs(x = "Substrate", y = expression("log"[10]*" fold-change")) +
+  theme_classic()
+```
+
+These are definitely skewed as expected, less interesting information than with paraoxon-methyl.
+
+#### Slope extraction
+
+```{r poe-vs-ptm-slope-extract}
+poe_ptm_corr <- poe_ptm_norm_data %>%
+  group_by(p233, p254, p271, p272, p306, p313, substrate, reference) %>%
+  summarize(log.activity = mean(log.activity)) %>%
+  ungroup() %>%
+  mutate(across(1:6, ~ case_when(. == 0 ~ '0', . == 1 ~ 'x'))) %>%
+  unite("geno", p233:p313, sep = "") %>%
+  pivot_wider(names_from = substrate, values_from = log.activity) %>%
+  mutate(slope = `1` - `0`) %>%
+  select(geno, reference, slope) %>%
+  merge(., test_ees %>% filter(sub %in% c("POE", "PTM")) %>% select(geno, sub, new_val) %>% pivot_wider(names_from = sub, values_from = new_val), by = c("geno") ) %>%
+  ggplot(aes(x = POE, y = PTM, color = slope, label = geno)) +
+  geom_point() +
+  geom_abline(intercept = 0, slope = 1, lty = 2, col = "grey") +
+  geom_vline(xintercept = 0, lty = 2, col = "grey") +
+  geom_hline(yintercept = 0, lty = 2, col = "grey") +
+  scale_colour_gradient(
+    low = "red",
+    high = "green",
+  ) +
+  theme_classic()
+
+poe_ptm_corr
+```
+
+## All-by-all comparison with normalization with wtPTE-POE
+
+It may be better to visualize all plots compated to wtPTE-POE, then plot on 2D scatted plots with phenotype instead of epistasis. No need to color by slope values as these are inherently included in the data: deviation away from the 1-to-1 line means switching is unfavorable (below) or favorable (above) to substrate on y-axis
+
+```{r all-by-all-norm, message=F}
+all_by_all_data <- processed_data %>%
+  select(-c(replicate, exp_day, plate_id))
+
+all_wt_mean <- mean(all_by_all_data %>% filter(if_all(1:6, ~. == 0)) %>% filter(substrate == "POE") %>% pull(activity))
+
+all_by_all_data_norm <- all_by_all_data %>%
+  mutate(activity = activity/all_wt_mean,
+         log.activity = log10(activity))
+
+# Create a list of all combinations of substrates
+substrate_combinations <- combn(unique(all_by_all_data_norm$substrate), 2, simplify = FALSE)
+
+plots <- lapply(substrate_combinations, function(subs) {
+  ggplot(all_by_all_data_norm %>%
+           filter(substrate %in% subs) %>%
+           group_by(p233, p254, p271, p272, p306, p313, substrate, reference) %>%
+           summarize(log.activity = mean(log.activity)) %>%
+           ungroup() %>%
+           mutate(substrate = case_when(substrate == subs[1] ~ "sub1", substrate == subs[2] ~ "sub2")) %>%
+           mutate(across(1:6, ~ case_when(. == 0 ~ '0', . == 1 ~ 'x'))) %>%
+           unite("geno", p233:p313, sep = "") %>%
+           mutate(mut_order = str_count(geno, "x")) %>%
+           pivot_wider(names_from = substrate, values_from = log.activity), 
+         aes(x = sub1, y = sub2, color = mut_order)) +
+    geom_point() +
+    geom_abline(slope = 1, intercept = 0, lty = 2) +
+    labs(x = paste("POE-normalized phenotype of ", subs[1], sep=""),
+         y = paste("POE-normalized phenotype of ", subs[2], sep="")) +
+    #geom_text_repel(size = 2, max.overlaps = Inf) +
+    theme_classic() +
+    theme(legend.position = "none", axis.title = element_text(size = 6))
+})
+```
+
+I also exported the `all_by_all_data_norm` to create an HTML widget for better visualization of the genotypes
+
+```{r export-all-by-all}
+write_csv(all_by_all_data_norm, "all_by_all.csv")
+```
+
+### Correlations
+
+I can calculate two main parameters: pearson correlation and spearman correlation for each substrate pair
+
+```{r pearsons-all-v-all}
+pearsons <- lapply(substrate_combinations, function(subs) {
+  
+all_by_all_data_norm %>%
+    filter(substrate %in% subs) %>%
+    group_by(p233, p254, p271, p272, p306, p313, substrate, reference) %>%
+    summarize(log.activity = mean(log.activity)) %>%
+    ungroup() %>%
+    mutate(substrate = case_when(substrate == subs[1] ~ "sub1", substrate == subs[2] ~ "sub2")) %>%
+    mutate(across(1:6, ~ case_when(. == 0 ~ '0', . == 1 ~ 'x'))) %>%
+    unite("geno", p233:p313, sep = "") %>%
+    mutate(mut_order = str_count(geno, "x")) %>%
+    pivot_wider(names_from = substrate, values_from = log.activity) %>%
+    summarise(correlation = cor.test(sub1, sub2, method = "pearson")$estimate) %>%
+    pull(correlation)
+  
+})
+
+spearmans <- lapply(substrate_combinations, function(subs) {
+  
+all_by_all_data_norm %>%
+    filter(substrate %in% subs) %>%
+    group_by(p233, p254, p271, p272, p306, p313, substrate, reference) %>%
+    summarize(log.activity = mean(log.activity)) %>%
+    ungroup() %>%
+    mutate(substrate = case_when(substrate == subs[1] ~ "sub1", substrate == subs[2] ~ "sub2")) %>%
+    mutate(across(1:6, ~ case_when(. == 0 ~ '0', . == 1 ~ 'x'))) %>%
+    unite("geno", p233:p313, sep = "") %>%
+    mutate(mut_order = str_count(geno, "x")) %>%
+    pivot_wider(names_from = substrate, values_from = log.activity) %>%
+    summarise(correlation = cor.test(sub1, sub2, method = "spearman")$estimate) %>%
+    pull(correlation)
+  
+})
+
+one_to_one <- lapply(substrate_combinations, function(subs) {
+  
+all_by_all_data_norm %>%
+    filter(substrate %in% subs) %>%
+    group_by(p233, p254, p271, p272, p306, p313, substrate, reference) %>%
+    summarize(log.activity = mean(log.activity)) %>%
+    ungroup() %>%
+    mutate(substrate = case_when(substrate == subs[1] ~ "sub1", substrate == subs[2] ~ "sub2")) %>%
+    mutate(across(1:6, ~ case_when(. == 0 ~ '0', . == 1 ~ 'x'))) %>%
+    unite("geno", p233:p313, sep = "") %>%
+    mutate(mut_order = str_count(geno, "x")) %>%
+    pivot_wider(names_from = substrate, values_from = log.activity) %>%
+    summarise(correlation = cor.test(sub1, sub2, method = "spearman")$estimate) %>%
+    pull(correlation)
+  
+})
+
+sub_stats <- tibble(sub1 = unlist(substrate_combinations)[seq(1, length(unlist(substrate_combinations)), by = 2)],
+       sub2 = unlist(substrate_combinations)[seq(2, length(unlist(substrate_combinations)), by = 2)],
+       pearsons = unlist(pearsons), 
+       spearman = unlist(spearmans))
+
+knitr::kable(sub_stats)
+#write_csv(sub_stats, "sub_stats.csv")
+```
+
+Plot a correlation heatmap
+
+```{r}
+# 1. Update the labels and the ordering vector first
+sub_order <- c("2NH", "acetate", "butyrate", "POE", "POM", "PTE", "PTM", "DHC", "TBBL")
+
+cor_plot_data <- bind_rows(sub_stats, (sub_stats %>% rename(sub1 = sub2, sub2 = sub1))) %>%
+  # Update names to match the new order vector
+  mutate(across(c(sub1, sub2), ~ ifelse(. == "tbbl", "TBBL", .))) %>%
+  distinct() %>%
+  filter(sub1 %in% sub_order & sub2 %in% sub_order) %>%
+  mutate(
+    sub1 = factor(sub1, levels = rev(sub_order)), # Reversed for Y-axis (Top to Bottom)
+    sub2 = factor(sub2, levels = sub_order)       # Standard for X-axis (Left to Right)
+  )
+
+# 2. Plot
+tile <- ggplot(cor_plot_data, aes(x = sub2, y = sub1, fill = pearsons)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = sprintf("%.2f", pearsons)), 
+            size = 1.5, 
+            color = ifelse(abs(cor_plot_data$pearsons) > 0.5, "white", "black"),
+            fontface = "bold") +
+  scale_fill_gradient2(
+    low = "#1F78B4", mid = "white", high = "#E31A1C",
+    midpoint = 0, limit = c(-1, 1)) +
+  theme_minimal() + 
+  theme(
+    axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1),
+    axis.text = element_text(size = 6),
+    axis.title = element_blank(),
+    panel.grid = element_blank(),
+    legend.position = "none"
+  ) +
+  coord_fixed()
+
+tile
+
+ggsave("fig_2_b.svg", plot = tile, width = 180/3, height = 247/3, dpi = 600, units = "mm")
+```
+
+What about correlations of SMEs and EEs across substrates positions
+
+### Correlations between them
+
+Calculate the correlations for each between substrates across positions
+
+```{r}
+corr_data <- test_ees %>%
+  # Select only the columns needed for pivoting
+  select(geno, sub, new_val, sig) %>%
+  # Spread the data so each substrate is a column
+  pivot_wider(names_from = sub, values_from = new_val) %>%
+  # Remove NA genotypes
+  filter(sig == TRUE) %>%
+  # Remove the 'geno' column so only numeric data remains for correlation
+  select(-c(geno,sig))
+
+cor_matrix <- cor(corr_data, method = "pearson", use = "pairwise.complete.obs")
+
+cor_tibble <- cor_matrix %>%
+  as.data.frame() %>%
+  rownames_to_column(var = "sub1") %>%
+  as_tibble() %>%
+  pivot_longer(
+    cols = -sub1, 
+    names_to = "sub2", 
+    values_to = "pearsons"
+  ) %>%
+  # Filter out self-corrlelation
+  #filter(sub1 != sub2) %>%
+  mutate(across(c(sub1, sub2), ~ ifelse(. == "tbbl", "TBBL", .))) %>%
+  mutate(
+    sub1 = factor(sub1, levels = rev(sub_order)), # Reversed for Y-axis (Top to Bottom)
+    sub2 = factor(sub2, levels = sub_order)       # Standard for X-axis (Left to Right)
+  ) %>%
+  filter(sub1 != sub2) # Remove perfect fits
+
+tile <- cor_tibble %>%
+  ggplot(aes(x = sub2, y = sub1, fill = pearsons)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = sprintf("%.2f", pearsons)), 
+            size = 2, 
+            color = ifelse(abs(cor_tibble$pearsons) > 0.5, "white", "black"),
+            fontface = "bold") +
+  scale_fill_gradient2(
+    low = "#1F78B4", mid = "white", high = "#E31A1C",
+    midpoint = 0, limit = c(-1, 1)) +
+  theme_minimal() + 
+  theme(
+    axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1),
+    axis.text = element_text(size = 7),
+    axis.title = element_blank(),
+    panel.grid = element_blank(),
+    legend.position = "none"
+  ) +
+  coord_fixed()
+
+tile
+
+ggsave("fig_4_e.svg", plot = tile, width = 180/2.2, height = 247/2.2, dpi = 600, units = "mm")
+```
+
+Then correlation of SMEs and EEs by substrate and position (6 heat maps)
+
+```{r}
+# 1. Update the labels and the ordering vector first
+sub_order <- c("2NH", "acetate", "butyrate", "POE", "POM", "PTE", "PTM", "DHC", "TBBL")
+
+cor_plot_data <- bind_rows(sub_stats, (sub_stats %>% rename(sub1 = sub2, sub2 = sub1))) %>%
+  # Update names to match the new order vector
+  mutate(across(c(sub1, sub2), ~ ifelse(. == "tbbl", "TBBL", .))) %>%
+  distinct() %>%
+  filter(sub1 %in% sub_order & sub2 %in% sub_order) %>%
+  mutate(
+    sub1 = factor(sub1, levels = rev(sub_order)), # Reversed for Y-axis (Top to Bottom)
+    sub2 = factor(sub2, levels = sub_order)       # Standard for X-axis (Left to Right)
+  )
+
+# 2. Plot
+tile <- ggplot(cor_plot_data, aes(x = sub2, y = sub1, fill = pearsons)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = sprintf("%.2f", pearsons)), 
+            size = 1.5, 
+            color = ifelse(abs(cor_plot_data$pearsons) > 0.5, "white", "black"),
+            fontface = "bold") +
+  scale_fill_gradient2(
+    low = "#1F78B4", mid = "white", high = "#E31A1C",
+    midpoint = 0, limit = c(-1, 1)) +
+  theme_minimal() + 
+  theme(
+    axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1),
+    axis.text = element_text(size = 6),
+    axis.title = element_blank(),
+    panel.grid = element_blank(),
+    legend.position = "none"
+  ) +
+  coord_fixed()
+
+tile
+
+#ggsave("fig_2_b.svg", plot = tile, width = 180/3, height = 247/3, dpi = 600, units = "mm")
+```
+
+### Heat map
+
+For activity of all substrates
+
+```{r}
+tile <- normalized_bulky_mean_data %>%
+  unite("geno", p233:p313, sep = "") %>%
+  mutate(
+    substrate = case_when(substrate == "tbbl" ~ "TBBL",
+                          TRUE ~ substrate),
+    geno = fct_inorder(geno),
+    substrate = factor(substrate, levels = rev(c("2NH", 
+                                             "acetate", 
+                                             "butyrate",
+                                             "POE",
+                                             "POM",
+                                             "PTE",
+                                             "PTM",
+                                             "DHC",
+                                             "TBBL")))
+  ) %>%
+  ggplot(aes(x = geno, y = substrate, fill = mean_value)) +
+  geom_tile(color = "black", linewidth = 0.1) +
+  scale_x_discrete(position = "top") +
+  scale_fill_gradient2(
+    low = "#1F78B4",
+    mid = "white",
+    high = "#E31A1C",
+    midpoint = 0
+  ) +
+  theme_minimal() +
+  theme(
+    # 45 degree tilt, adjusted for top position
+    axis.text.x.top = element_text(angle = 45, hjust = 0, vjust = 0, size = 6),
+    axis.title.y = element_blank(),
+    axis.text.y = element_text(size = 6),
+    axis.title.x.top = element_text(size = 6),
+    panel.grid = element_blank(),
+    legend.position = "right",
+    legend.text = element_text(size = 6)
+  ) +
+  labs(x = "Genotype", 
+       fill = expression("log"[10]*" fold change in activity")) +
+  coord_fixed()
+
+tile
+
+# Clean figure
+ggsave("fig_sub_heatmap.svg", plot = tile + theme(legend.position = "none"), width = 180, height = 247/3, dpi = 600, units = "mm")
+# With legend for reference
+ggsave("fig_sub_heatmap_legend.svg", plot = tile, width = 180, height = 247/3, dpi = 600, units = "mm")
+```
+
+# Dimentionality reduction
+
+## PCA
+
+### Newer PCA
+
+```{r}
+# 1. Reshape the data: 1 row per genotype, 1 column per substrate
+pca_wide <- normalized_bulky_mean_data %>%
+  select(reference, p233, p254, p271, p272, p306, p313, substrate, mean_value) %>%
+  pivot_wider(names_from = substrate, values_from = mean_value)
+
+# 2. Isolate activity columns for the calculation
+# This ensures binary mutation data doesn't skew the variance
+substrates <- unique(normalized_bulky_mean_data$substrate)
+pca_matrix <- pca_wide %>% 
+  column_to_rownames("reference") %>% 
+  select(all_of(substrates))
+
+# 3. Run PCA with scaling
+# Scaling is crucial because substrate activity ranges often differ
+pca_res <- prcomp(pca_matrix, scale. = TRUE)
+
+# 4. Generate a striking Biplot
+fviz_pca_biplot(pca_res, 
+                # Genotype points
+                geom.ind = "point", 
+                pointshape = 21, 
+                pointsize = 3.5,
+                fill.ind = as.factor(pca_wide$p254), # Color by a key mutation
+                alpha.ind = 0.8,
+                # Substrate vectors (Arrows)
+                col.var = "black", 
+                arrowsize = 0.7,
+                repel = TRUE, # Prevent label overlap
+                # Aesthetics
+                palette = "npg", # Nature Publishing Group color palette
+                addEllipses = TRUE, # Adds 'clouds' around the groups
+                legend.title = "Residue XX State") +
+  theme_classic() +
+  labs(title = "Substrate Activity Landscape",
+       subtitle = "PCA of 64 variants across 9 substrates")
+```
+
+Then 2 positions
+
+```{r}
+# 1. Prepare the factors
+pca_wide_labels <- pca_wide %>%
+  mutate(p254_factor = as.factor(p254),
+         p306_factor = as.factor(p306))
+
+# 2. Build the plot
+# We set habillage to NULL and add the points manually to control fill vs color
+pca_plot <- fviz_pca_biplot(pca_res,
+                geom.ind = "none", # Don't let fviz draw the points
+                col.var = "black", 
+                arrowsize = 0.4,
+                repel = TRUE,
+                mean.point = FALSE) 
+
+# 3. Manually add the points with independent fill and shape
+pca_plot_final <- pca_plot + 
+  geom_point(data = as.data.frame(pca_res$x), 
+             aes(x = PC1, y = PC2, 
+                 shape = pca_wide_labels$p254_factor, 
+                 fill = pca_wide_labels$p306_factor),
+             size = 1.5, color = "black", stroke = 0.1) + # 'color' is the outline, 'fill' is the inside
+  scale_fill_manual(values = c("0" = "#1F78B4", "1" = "#E31A1C")) +
+  scale_shape_manual(values = c("0" = 21, "1" = 22)) +
+  #guides(fill = guide_legend(override.aes = list(shape = 21))) +
+  theme_classic() +
+  labs(title = NULL) +
+  theme(
+    legend.position = "none",
+    panel.border = element_rect(fill = NA, color = "black", linewidth = 0.3),
+    axis.line = element_line(colour = "black", linewidth = 0.25),
+    axis.ticks = element_line(linewidth = 0.2),
+    axis.title = element_text(size = 8),
+    axis.text = element_text(size = 8)
+  )
+
+pca_plot_final
+
+ggsave("fig_2_pca.svg", plot = pca_plot_final, width = 180/3, height = 180/3, dpi = 600, units = "mm")
+```
+
+### Performing PCA
+
+First it is worth to add some categorical groups into things. Examples include order (i.e. number of mutations) etc.
+
+```{r pca-add-groups-non-norm}
+pre_pre_data <- normalized_bulky_mean_data %>%
+  rowwise() %>% 
+  mutate(order = sum(c(p233,p254,p271,p272,p306,p313)))
+# add more groups here if needed
+```
+
+This time these are definitely not scaled
+
+```{r pca-non-norm}
+# Convert data to entries of length 15
+pca_data <- pre_pre_data %>%
+  select(c(p233,p254,p271,p272,p306,p313,substrate,mean_value,order)) %>%
+  pivot_wider(names_from = substrate, values_from = mean_value) %>%
+  as.data.frame()
+
+# Old school dataframe because PCA prefers it
+rownames(pca_data) <- pca_data$ref_geno
+
+# Generate final data
+pca_final_data <- subset(pca_data, select = -order)
+
+# Perform PCA on the 15 variables
+pca_result <- prcomp(pca_final_data, scale. = F)
+
+summary(pca_result)
+```
+
+### Visualiazing the PCA
+
+```{r pca-scree-plot-non-norm}
+fviz_eig(pca_result)
+```
+
+```{r pca-ind-plot-non-norm}
+# Biplot
+pca_result %>%
+  fviz_pca_ind(col.ind = "cos2", # Color by the quality of representation
+               gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"),
+               repel = TRUE # Avoid text overlapping
+             ) +
+  theme_classic()
+```
+
+```{r pca-contribution-non-norm}
+pca_result %>%
+  fviz_pca_var(col.var = "contrib", # Color by contributions to the PC
+               gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"),
+               repel = TRUE # Avoid text overlapping
+             ) +
+  theme_classic()
+```
+
+Interpreting these results is difficult because as it turns out, traditional PCA analysis on these data is incorrect, as the encoding for mutations (0 and 1) is put on the same scale as activity. These are not true continuous data and thus should not be represented on this scale.
+
+```{r pca-biplot-non-norm}
+pca_result %>%
+  fviz_pca_biplot(repel = TRUE,
+                  col.var = "#2E9FDF", # Variables color
+                  col.ind = "#696969"  # Individuals color
+             ) +
+  theme_classic()
+```
+
+Combining the two analyses is obviously noisy.
+
+```{r pca-viz-order-non-norm}
+mutational_order <- as.factor(pca_data$order)
+pca_result %>%
+  fviz_pca_ind(col.ind = mutational_order, # color by order
+               addEllipses = TRUE, # Concentration ellipses 
+               legend.title = "Groups",
+               repel = TRUE
+             ) +
+  theme_classic()
+```
+
+Here groups represent the mutational order. These results are hard to interpret when not normalized.
